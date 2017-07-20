@@ -46,7 +46,6 @@ final class ActiveSession implements SSLSession {
     private int peerPort = -1;
     private long lastAccessedTime = 0;
     private volatile javax.security.cert.X509Certificate[] peerCertificateChain;
-    private X509Certificate[] localCertificates;
     private X509Certificate[] peerCertificates;
     private byte[] peerCertificateOcspData;
     private byte[] peerTlsSctData;
@@ -218,6 +217,7 @@ final class ActiveSession implements SSLSession {
 
     @Override
     public Certificate[] getLocalCertificates() {
+        X509Certificate[] localCertificates = ssl.getLocalCertificates();
         return localCertificates == null ? null : localCertificates.clone();
     }
 
@@ -254,6 +254,7 @@ final class ActiveSession implements SSLSession {
 
     @Override
     public Principal getLocalPrincipal() {
+        X509Certificate[] localCertificates = ssl.getLocalCertificates();
         if (localCertificates != null && localCertificates.length > 0) {
             return localCertificates[0].getSubjectX500Principal();
         } else {
@@ -318,7 +319,7 @@ final class ActiveSession implements SSLSession {
         id = null;
         this.peerHost = peerHost;
         this.peerPort = peerPort;
-        this.localCertificates = ssl.getLocalCertificates();
+        //this.localCertificates = ssl.getLocalCertificates();
     }
 
     /**

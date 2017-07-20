@@ -45,7 +45,9 @@ import java.nio.ByteBuffer;
 import java.security.cert.CertificateEncodingException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
 import javax.net.ssl.SSLException;
 import javax.net.ssl.SSLHandshakeException;
@@ -167,11 +169,17 @@ final class SSLUtils {
     private static final int MAX_ENCRYPTION_OVERHEAD_DIFF =
             Integer.MAX_VALUE - MAX_ENCRYPTION_OVERHEAD_LENGTH;
 
-    /** Key type: RSA certificate. */
     private static final String KEY_TYPE_RSA = "RSA";
-
-    /** Key type: Elliptic Curve certificate. */
     private static final String KEY_TYPE_EC = "EC";
+
+    // key type mappings for types.
+    private static final Map<String, String> KEY_TYPES = new HashMap<String, String>();
+    static {
+        KEY_TYPES.put("RSA", KEY_TYPE_RSA);
+        KEY_TYPES.put("DHE_RSA", KEY_TYPE_RSA);
+        KEY_TYPES.put("ECDHE_RSA", KEY_TYPE_RSA);
+        KEY_TYPES.put("ECDHE_ECDSA", KEY_TYPE_EC);
+    }
 
     static X509Certificate[] decodeX509CertificateChain(byte[][] certChain)
             throws java.security.cert.CertificateException {
@@ -206,15 +214,8 @@ final class SSLUtils {
      * X509ExtendedKeyManager.chooseEngineServerAlias. Returns {@code null} for key exchanges that
      * do not use X.509 for server authentication.
      */
-    static String getServerX509KeyType(long sslCipherNative) throws SSLException {
-        String kx_name = NativeCrypto.SSL_CIPHER_get_kx_name(sslCipherNative);
-        if (kx_name.equals("RSA") || kx_name.equals("DHE_RSA") || kx_name.equals("ECDHE_RSA")) {
-            return KEY_TYPE_RSA;
-        } else if (kx_name.equals("ECDHE_ECDSA")) {
-            return KEY_TYPE_EC;
-        } else {
-            return null;
-        }
+    static String getServerX509KeyType(String kx_name) {
+        return KEY_TYPES.get(kx_name);
     }
 
     /**

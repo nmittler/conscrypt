@@ -44,6 +44,7 @@ import javax.net.ssl.SSLSession;
 import javax.net.ssl.X509KeyManager;
 import javax.net.ssl.X509TrustManager;
 import javax.security.auth.x500.X500Principal;
+import org.conscrypt.NativeCrypto.SSLHandshakeCallbacks;
 import org.conscrypt.NativeRef.SSL_SESSION;
 
 /**
@@ -57,8 +58,7 @@ import org.conscrypt.NativeRef.SSL_SESSION;
  * </ul>
  */
 final class ConscryptFileDescriptorSocket extends OpenSSLSocketImpl
-        implements NativeCrypto.SSLHandshakeCallbacks, SSLParametersImpl.AliasChooser,
-                   SSLParametersImpl.PSKCallbacks {
+        implements SSLHandshakeCallbacks, AliasChooser, PSKCallbacks {
     private static final boolean DBG_STATE = false;
 
     /**
@@ -154,8 +154,8 @@ final class ConscryptFileDescriptorSocket extends OpenSSLSocketImpl
         sslSession = new ActiveSession(ssl, sslParameters.getSessionContext());
     }
 
-    private static SslWrapper newSsl(SSLParametersImpl sslParameters,
-            ConscryptFileDescriptorSocket engine) {
+    private static SslWrapper newSsl(
+            SSLParametersImpl sslParameters, ConscryptFileDescriptorSocket engine) {
         try {
             return SslWrapper.newInstance(sslParameters, engine, engine, engine);
         } catch (SSLException e) {
@@ -188,7 +188,7 @@ final class ConscryptFileDescriptorSocket extends OpenSSLSocketImpl
             Platform.closeGuardOpen(guard, "close");
 
             // Prepare the SSL object for the handshake.
-            ssl.initialize(getHostname(), channelIdPrivateKey);
+            ssl.configure(getHostname(), channelIdPrivateKey);
 
             // For clients, offer to resume a previously cached session to avoid the
             // full TLS handshake.
@@ -306,14 +306,14 @@ final class ConscryptFileDescriptorSocket extends OpenSSLSocketImpl
 
     @Override
     @SuppressWarnings("unused") // used by native psk_client_callback
-    public int clientPSKKeyRequested(String identityHint, byte[] identity, byte[] key) {
-        return ssl.clientPSKKeyRequested(identityHint, identity, key);
+    public int clientPreSharedKeyRequested(String identityHint, byte[] identity, byte[] key) {
+        return ssl.clientPreSharedKeyRequested(identityHint, identity, key);
     }
 
     @Override
     @SuppressWarnings("unused") // used by native psk_server_callback
-    public int serverPSKKeyRequested(String identityHint, String identity, byte[] key) {
-        return ssl.serverPSKKeyRequested(identityHint, identity, key);
+    public int serverPreSharedKeyRequested(String identityHint, String identity, byte[] key) {
+        return ssl.serverPreSharedKeyRequested(identityHint, identity, key);
     }
 
     @Override
@@ -467,9 +467,8 @@ final class ConscryptFileDescriptorSocket extends OpenSSLSocketImpl
         startHandshake();
 
         synchronized (stateLock) {
-            while (state != STATE_READY &&
-                    state != STATE_READY_HANDSHAKE_CUT_THROUGH &&
-                    state != STATE_CLOSED) {
+            while (state != STATE_READY && state != STATE_READY_HANDSHAKE_CUT_THROUGH
+                    && state != STATE_CLOSED) {
                 try {
                     stateLock.wait();
                 } catch (InterruptedException e) {
@@ -497,8 +496,7 @@ final class ConscryptFileDescriptorSocket extends OpenSSLSocketImpl
          */
         private final Object readLock = new Object();
 
-        SSLInputStream() {
-        }
+        SSLInputStream() {}
 
         /**
          * Reads one byte. If there is no data in the underlying buffer,
@@ -537,7 +535,7 @@ final class ConscryptFileDescriptorSocket extends OpenSSLSocketImpl
                     }
                 }
 
-                int ret =  ssl.read(
+                int ret = ssl.read(
                         Platform.getFileDescriptor(socket), buf, offset, byteCount, getSoTimeout());
                 if (ret == -1) {
                     synchronized (stateLock) {
@@ -576,8 +574,7 @@ final class ConscryptFileDescriptorSocket extends OpenSSLSocketImpl
          */
         private final Object writeLock = new Object();
 
-        SSLOutputStream() {
-        }
+        SSLOutputStream() {}
 
         /**
          * Method acts as described in spec for superclass.
@@ -753,7 +750,7 @@ final class ConscryptFileDescriptorSocket extends OpenSSLSocketImpl
             if (state != STATE_NEW) {
                 throw new IllegalStateException(
                         "Could not enable/disable Channel ID after the initial handshake has"
-                                + " begun.");
+                        + " begun.");
             }
         }
         sslParameters.channelIdEnabled = enabled;
@@ -806,7 +803,7 @@ final class ConscryptFileDescriptorSocket extends OpenSSLSocketImpl
             if (state != STATE_NEW) {
                 throw new IllegalStateException(
                         "Could not change Channel ID private key after the initial handshake has"
-                                + " begun.");
+                        + " begun.");
             }
         }
 
@@ -1069,8 +1066,8 @@ final class ConscryptFileDescriptorSocket extends OpenSSLSocketImpl
     }
 
     @Override
-    public String chooseClientAlias(X509KeyManager keyManager, X500Principal[] issuers,
-            String[] keyTypes) {
+    public String chooseClientAlias(
+            X509KeyManager keyManager, X500Principal[] issuers, String[] keyTypes) {
         return keyManager.chooseClientAlias(keyTypes, null, this);
     }
 

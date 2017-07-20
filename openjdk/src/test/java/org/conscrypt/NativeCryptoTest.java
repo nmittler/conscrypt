@@ -16,7 +16,6 @@
 
 package org.conscrypt;
 
-import static org.conscrypt.NativeConstants.SSL_MODE_CBC_RECORD_SPLITTING;
 import static org.conscrypt.NativeConstants.SSL_MODE_ENABLE_FALSE_START;
 import static org.conscrypt.NativeConstants.SSL_OP_NO_SSLv3;
 import static org.conscrypt.NativeConstants.SSL_OP_NO_TLSv1;
@@ -495,8 +494,6 @@ public class NativeCryptoTest {
         // check SSL_MODE_ENABLE_FALSE_START on by default for BoringSSL
         assertEquals(SSL_MODE_ENABLE_FALSE_START,
                 NativeCrypto.SSL_get_mode(s) & SSL_MODE_ENABLE_FALSE_START);
-        // check SSL_MODE_CBC_RECORD_SPLITTING off by default
-        assertEquals(0, NativeCrypto.SSL_get_mode(s) & SSL_MODE_CBC_RECORD_SPLITTING);
 
         // set SSL_MODE_ENABLE_FALSE_START on
         NativeCrypto.SSL_set_mode(s, SSL_MODE_ENABLE_FALSE_START);
@@ -736,7 +733,7 @@ public class NativeCryptoTest {
 
         @Override
         public void verifyCertificateChain(byte[][] certs, String authMethod)
-            throws CertificateException {
+                throws CertificateException {
             certificateChainRefs = new long[certs.length];
             for (int i = 0; i < certs.length; ++i) {
                 byte[] cert = certs[i];
@@ -795,10 +792,10 @@ public class NativeCryptoTest {
         private byte[] clientPSKKeyRequestedResultIdentity;
 
         @Override
-        public int clientPSKKeyRequested(String identityHint, byte[] identity, byte[] key) {
+        public int clientPreSharedKeyRequested(String identityHint, byte[] identity, byte[] key) {
             if (DEBUG) {
                 System.out.println("ssl=0x" + Long.toString(sslNativePointer, 16)
-                        + " clientPSKKeyRequested"
+                        + " clientPreSharedKeyRequested"
                         + " identityHint=" + identityHint + " identity capacity=" + identity.length
                         + " key capacity=" + key.length);
             }
@@ -822,10 +819,10 @@ public class NativeCryptoTest {
         private String serverPSKKeyRequestedIdentity;
 
         @Override
-        public int serverPSKKeyRequested(String identityHint, String identity, byte[] key) {
+        public int serverPreSharedKeyRequested(String identityHint, String identity, byte[] key) {
             if (DEBUG) {
                 System.out.println("ssl=0x" + Long.toString(sslNativePointer, 16)
-                        + " serverPSKKeyRequested"
+                        + " serverPreSharedKeyRequested"
                         + " identityHint=" + identityHint + " identity=" + identity
                         + " key capacity=" + key.length);
             }

@@ -16,9 +16,7 @@
 
 package org.conscrypt;
 
-import static org.conscrypt.NativeConstants.SSL_MODE_CBC_RECORD_SPLITTING;
 import static org.conscrypt.NativeConstants.SSL_OP_CIPHER_SERVER_PREFERENCE;
-import static org.conscrypt.NativeConstants.SSL_OP_NO_TICKET;
 import static org.conscrypt.NativeConstants.SSL_RECEIVED_SHUTDOWN;
 import static org.conscrypt.NativeConstants.SSL_SENT_SHUTDOWN;
 import static org.conscrypt.NativeConstants.SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
@@ -44,8 +42,6 @@ import javax.net.ssl.X509KeyManager;
 import javax.net.ssl.X509TrustManager;
 import javax.security.auth.x500.X500Principal;
 import org.conscrypt.NativeCrypto.SSLHandshakeCallbacks;
-import org.conscrypt.SSLParametersImpl.AliasChooser;
-import org.conscrypt.SSLParametersImpl.PSKCallbacks;
 
 /**
  * A utility wrapper that abstracts operations on the underlying native SSL instance.
@@ -74,10 +70,6 @@ final class SslWrapper {
         this.handshakeCallbacks = handshakeCallbacks;
         this.aliasChooser = aliasChooser;
         this.pskCallbacks = pskCallbacks;
-    }
-
-    long ssl() {
-        return ssl;
     }
 
     BioWrapper newBio() {
@@ -125,10 +117,10 @@ final class SslWrapper {
     }
 
     /**
-     * @see NativeCrypto.SSLHandshakeCallbacks#clientPSKKeyRequested(String, byte[], byte[])
+     * @see SSLHandshakeCallbacks#clientPreSharedKeyRequested(String, byte[], byte[])
      */
-    @SuppressWarnings("deprecation") // PSKKeyManager is deprecated, but in our own package
-    int clientPSKKeyRequested(String identityHint, byte[] identityBytesOut, byte[] key) {
+    int clientPreSharedKeyRequested(String identityHint, byte[] identityBytesOut, byte[] key) {
+        @SuppressWarnings("deprecation") // PSKKeyManager is deprecated, but in our own package
         PSKKeyManager pskKeyManager = parameters.getPSKKeyManager();
         if (pskKeyManager == null) {
             return 0;
@@ -171,10 +163,10 @@ final class SslWrapper {
     }
 
     /**
-     * @see NativeCrypto.SSLHandshakeCallbacks#serverPSKKeyRequested(String, String, byte[])
+     * @see SSLHandshakeCallbacks#serverPreSharedKeyRequested(String, String, byte[])
      */
-    @SuppressWarnings("deprecation") // PSKKeyManager is deprecated, but in our own package
-    int serverPSKKeyRequested(String identityHint, String identity, byte[] key) {
+    int serverPreSharedKeyRequested(String identityHint, String identity, byte[] key) {
+        @SuppressWarnings("deprecation") // PSKKeyManager is deprecated, but in our own package
         PSKKeyManager pskKeyManager = parameters.getPSKKeyManager();
         if (pskKeyManager == null) {
             return 0;
@@ -195,57 +187,9 @@ final class SslWrapper {
         Set<String> keyTypesSet = SSLUtils.getSupportedClientKeyTypes(keyTypeBytes);
         String[] keyTypes = keyTypesSet.toArray(new String[keyTypesSet.size()]);
 
-        X500Principal[] issuers;
-        if (asn1DerEncodedPrincipals == null) {
-            issuers = null;
-        } else {
-            issuers = new X500Principal[asn1DerEncodedPrincipals.length];
-            for (int i = 0; i < asn1DerEncodedPrincipals.length; i++) {
-                issuers[i] = new X500Principal(asn1DerEncodedPrincipals[i]);
-            }
-        }
-        X509KeyManager keyManager = parameters.getX509KeyManager();
-        String alias = (keyManager != null)
-                ? aliasChooser.chooseClientAlias(keyManager, issuers, keyTypes)
-                : null;
-        setCertificate(alias);
-    }
+        X500Principal[] issuers = decodeIssuers(asn1DerEncodedPrincipals);
 
-    void setCertificate(String alias) throws CertificateEncodingException, SSLException {
-        if (alias == null) {
-            return;
-        }
-        X509KeyManager keyManager = parameters.getX509KeyManager();
-        if (keyManager == null) {
-            return;
-        }
-        PrivateKey privateKey = keyManager.getPrivateKey(alias);
-        if (privateKey == null) {
-            return;
-        }
-        localCertificates = keyManager.getCertificateChain(alias);
-        if (localCertificates == null) {
-            return;
-        }
-        int numLocalCerts = localCertificates.length;
-        PublicKey publicKey = (numLocalCerts > 0) ? localCertificates[0].getPublicKey() : null;
-
-        // Encode the local certificates.
-        byte[][] encodedLocalCerts = new byte[numLocalCerts][];
-        for (int i = 0; i < numLocalCerts; ++i) {
-            encodedLocalCerts[i] = localCertificates[i].getEncoded();
-        }
-
-        // Convert the key so we can access a native reference.
-        final OpenSSLKey key;
-        try {
-            key = OpenSSLKey.fromPrivateKeyForTLSStackOnly(privateKey, publicKey);
-        } catch (InvalidKeyException e) {
-            throw new SSLException(e);
-        }
-
-        // Set the local certs and private key.
-        NativeCrypto.setLocalCertsAndPrivateKey(ssl, encodedLocalCerts, key.getNativeRef());
+        setCertificate(chooseClientAlias(issuers, keyTypes));
     }
 
     String getVersion() {
@@ -260,97 +204,18 @@ final class SslWrapper {
         return NativeCrypto.SSL_get_tls_channel_id(ssl);
     }
 
-    void initialize(String hostname, OpenSSLKey channelIdPrivateKey) throws IOException {
-        boolean enableSessionCreation = parameters.getEnableSessionCreation();
-        if (!enableSessionCreation) {
-            NativeCrypto.SSL_set_session_creation_enabled(ssl, false);
-        }
-
-        // Allow servers to trigger renegotiation. Some inadvisable server
-        // configurations cause them to attempt to renegotiate during
-        // certain protocols.
-        NativeCrypto.SSL_accept_renegotiations(ssl);
-
-        if (isClient()) {
-            NativeCrypto.SSL_set_connect_state(ssl);
-
-            // Configure OCSP and CT extensions for client
-            NativeCrypto.SSL_enable_ocsp_stapling(ssl);
-            if (parameters.isCTVerificationEnabled(hostname)) {
-                NativeCrypto.SSL_enable_signed_cert_timestamps(ssl);
-            }
-        } else {
-            NativeCrypto.SSL_set_accept_state(ssl);
-
-            // Configure OCSP for server
-            if (parameters.getOCSPResponse() != null) {
-                NativeCrypto.SSL_enable_ocsp_stapling(ssl);
-            }
-        }
-
+    void configure(String hostname, OpenSSLKey channelIdPrivateKey) throws IOException {
         if (parameters.getEnabledProtocols().length == 0 && parameters.isEnabledProtocolsFiltered) {
             throw new SSLHandshakeException("No enabled protocols; "
-                    + NativeCrypto.OBSOLETE_PROTOCOL_SSLV3
-                    + " is no longer supported and was filtered from the list");
-        }
-        NativeCrypto.setEnabledProtocols(ssl, parameters.enabledProtocols);
-        NativeCrypto.setEnabledCipherSuites(ssl, parameters.enabledCipherSuites);
-
-        if (parameters.alpnProtocols != null) {
-            NativeCrypto.SSL_configure_alpn(ssl, isClient(), parameters.alpnProtocols);
+                + NativeCrypto.OBSOLETE_PROTOCOL_SSLV3
+                + " is no longer supported and was filtered from the list");
         }
 
-        // setup server certificates and private keys.
-        // clients will receive a call back to request certificates.
-        if (!isClient()) {
-            Set<String> keyTypes = new HashSet<String>();
-            for (long sslCipherNativePointer : NativeCrypto.SSL_get_ciphers(ssl)) {
-                String keyType = SSLUtils.getServerX509KeyType(sslCipherNativePointer);
-                if (keyType != null) {
-                    keyTypes.add(keyType);
-                }
-            }
-            X509KeyManager keyManager = parameters.getX509KeyManager();
-            if (keyManager != null) {
-                for (String keyType : keyTypes) {
-                    try {
-                        setCertificate(aliasChooser.chooseServerAlias(keyManager, keyType));
-                    } catch (CertificateEncodingException e) {
-                        throw new IOException(e);
-                    }
-                }
-            }
-
-            NativeCrypto.SSL_set_options(ssl, SSL_OP_CIPHER_SERVER_PREFERENCE);
-
-            if (parameters.sctExtension != null) {
-                NativeCrypto.SSL_set_signed_cert_timestamp_list(ssl, parameters.sctExtension);
-            }
-
-            if (parameters.ocspResponse != null) {
-                NativeCrypto.SSL_set_ocsp_response(ssl, parameters.ocspResponse);
-            }
-        }
-
-        enablePSKKeyManagerIfRequested();
-
-        if (parameters.useSessionTickets) {
-            NativeCrypto.SSL_clear_options(ssl, SSL_OP_NO_TICKET);
+        if (isClient()) {
+            configureClient(hostname, channelIdPrivateKey);
         } else {
-            NativeCrypto.SSL_set_options(
-                    ssl, NativeCrypto.SSL_get_options(ssl) | SSL_OP_NO_TICKET);
+            configureServer(hostname, channelIdPrivateKey);
         }
-
-        if (parameters.getUseSni() && AddressUtils.isValidSniHostname(hostname)) {
-            NativeCrypto.SSL_set_tlsext_host_name(ssl, hostname);
-        }
-
-        // BEAST attack mitigation (1/n-1 record splitting for CBC cipher suites
-        // with TLSv1 and SSLv3).
-        NativeCrypto.SSL_set_mode(ssl, SSL_MODE_CBC_RECORD_SPLITTING);
-
-        setCertificateValidation(ssl);
-        setTlsChannelId(channelIdPrivateKey);
     }
 
     // TODO(nathanmittler): Remove once after we switch to the engine socket.
@@ -373,82 +238,6 @@ final class SslWrapper {
     void write(FileDescriptor fd, byte[] buf, int offset, int len, int timeoutMillis)
             throws IOException {
         NativeCrypto.SSL_write(ssl, fd, handshakeCallbacks, buf, offset, len, timeoutMillis);
-    }
-
-    @SuppressWarnings("deprecation") // PSKKeyManager is deprecated, but in our own package
-    private void enablePSKKeyManagerIfRequested() throws SSLException {
-        // Enable Pre-Shared Key (PSK) key exchange if requested
-        PSKKeyManager pskKeyManager = parameters.getPSKKeyManager();
-        if (pskKeyManager != null) {
-            boolean pskEnabled = false;
-            for (String enabledCipherSuite : parameters.enabledCipherSuites) {
-                if ((enabledCipherSuite != null) && (enabledCipherSuite.contains("PSK"))) {
-                    pskEnabled = true;
-                    break;
-                }
-            }
-            if (pskEnabled) {
-                if (isClient()) {
-                    NativeCrypto.set_SSL_psk_client_callback_enabled(ssl, true);
-                } else {
-                    NativeCrypto.set_SSL_psk_server_callback_enabled(ssl, true);
-                    String identityHint = pskCallbacks.chooseServerPSKIdentityHint(pskKeyManager);
-                    NativeCrypto.SSL_use_psk_identity_hint(ssl, identityHint);
-                }
-            }
-        }
-    }
-
-    private void setTlsChannelId(OpenSSLKey channelIdPrivateKey) throws SSLException {
-        if (!parameters.channelIdEnabled) {
-            return;
-        }
-
-        if (parameters.getUseClientMode()) {
-            // Client-side TLS Channel ID
-            if (channelIdPrivateKey == null) {
-                throw new SSLHandshakeException("Invalid TLS channel ID key specified");
-            }
-            NativeCrypto.SSL_set1_tls_channel_id(ssl, channelIdPrivateKey.getNativeRef());
-        } else {
-            // Server-side TLS Channel ID
-            NativeCrypto.SSL_enable_tls_channel_id(ssl);
-        }
-    }
-
-    private void setCertificateValidation(long sslNativePointer) throws SSLException {
-        // setup peer certificate verification
-        if (!isClient()) {
-            // needing client auth takes priority...
-            boolean certRequested;
-            if (parameters.getNeedClientAuth()) {
-                NativeCrypto.SSL_set_verify(sslNativePointer, SSL_VERIFY_PEER
-                                | SSL_VERIFY_FAIL_IF_NO_PEER_CERT);
-                certRequested = true;
-                // ... over just wanting it...
-            } else if (parameters.getWantClientAuth()) {
-                NativeCrypto.SSL_set_verify(sslNativePointer, SSL_VERIFY_PEER);
-                certRequested = true;
-                // ... and we must disable verification if we don't want client auth.
-            } else {
-                NativeCrypto.SSL_set_verify(sslNativePointer, SSL_VERIFY_NONE);
-                certRequested = false;
-            }
-
-            if (certRequested) {
-                X509TrustManager trustManager = parameters.getX509TrustManager();
-                X509Certificate[] issuers = trustManager.getAcceptedIssuers();
-                if (issuers != null && issuers.length != 0) {
-                    byte[][] issuersBytes;
-                    try {
-                        issuersBytes = SSLUtils.encodeIssuerX509Principals(issuers);
-                    } catch (CertificateEncodingException e) {
-                        throw new SSLException("Problem encoding principals", e);
-                    }
-                    NativeCrypto.SSL_set_client_CA_list(sslNativePointer, issuersBytes);
-                }
-            }
-        }
     }
 
     void interrupt() {
@@ -508,10 +297,6 @@ final class SslWrapper {
         return NativeCrypto.SSL_get0_alpn_selected(ssl);
     }
 
-    private boolean isClient() {
-        return parameters.getUseClientMode();
-    }
-
     /**
      * A utility wrapper that abstracts operations on the underlying native BIO instance.
      */
@@ -539,6 +324,225 @@ final class SslWrapper {
         void close() {
             NativeCrypto.BIO_free_all(bio);
             bio = 0L;
+        }
+    }
+
+    private void configureClient(String hostname, OpenSSLKey channelIdPrivateKey) throws IOException {
+        if (!parameters.getEnableSessionCreation()) {
+            NativeCrypto.SSL_set_session_creation_enabled(ssl, false);
+        }
+        NativeCrypto.setEnabledProtocols(ssl, parameters.enabledProtocols);
+        NativeCrypto.setEnabledCipherSuites(ssl, parameters.enabledCipherSuites);
+        if (parameters.alpnProtocols != null) {
+            NativeCrypto.SSL_configure_alpn(ssl, isClient(), parameters.alpnProtocols);
+        }
+        NativeCrypto.enableSessionTickets(ssl, parameters.useSessionTickets);
+        if (parameters.getUseSni() && AddressUtils.isValidSniHostname(hostname)) {
+            NativeCrypto.SSL_set_tlsext_host_name(ssl, hostname);
+        }
+
+        NativeCrypto.SSL_set_connect_state(ssl);
+
+        // Configure OCSP and CT extensions for client
+        NativeCrypto.SSL_enable_ocsp_stapling(ssl);
+        if (parameters.isCTVerificationEnabled(hostname)) {
+            NativeCrypto.SSL_enable_signed_cert_timestamps(ssl);
+        }
+
+        if (isPreSharedKeyExchangeRequested()) {
+            NativeCrypto.set_SSL_psk_client_callback_enabled(ssl, true);
+        }
+
+        if (parameters.channelIdEnabled) {
+            if (channelIdPrivateKey == null) {
+                throw new SSLHandshakeException("Invalid TLS channel ID key specified");
+            }
+            NativeCrypto.SSL_set1_tls_channel_id(ssl, channelIdPrivateKey.getNativeRef());
+        }
+    }
+
+    private void configureServer(String hostname, OpenSSLKey channelIdPrivateKey)  throws IOException {
+        if (!parameters.getEnableSessionCreation()) {
+            NativeCrypto.SSL_set_session_creation_enabled(ssl, false);
+        }
+        NativeCrypto.setEnabledProtocols(ssl, parameters.enabledProtocols);
+        NativeCrypto.setEnabledCipherSuites(ssl, parameters.enabledCipherSuites);
+        if (parameters.alpnProtocols != null) {
+            NativeCrypto.SSL_configure_alpn(ssl, isClient(), parameters.alpnProtocols);
+        }
+        NativeCrypto.enableSessionTickets(ssl, parameters.useSessionTickets);
+        if (parameters.getUseSni() && AddressUtils.isValidSniHostname(hostname)) {
+            NativeCrypto.SSL_set_tlsext_host_name(ssl, hostname);
+        }
+
+        NativeCrypto.SSL_set_accept_state(ssl);
+
+        // Configure OCSP for server
+        if (parameters.getOCSPResponse() != null) {
+            NativeCrypto.SSL_enable_ocsp_stapling(ssl);
+        }
+
+        NativeCrypto.SSL_set_options(ssl, SSL_OP_CIPHER_SERVER_PREFERENCE);
+
+        if (parameters.sctExtension != null) {
+            NativeCrypto.SSL_set_signed_cert_timestamp_list(ssl, parameters.sctExtension);
+        }
+
+        if (parameters.ocspResponse != null) {
+            NativeCrypto.SSL_set_ocsp_response(ssl, parameters.ocspResponse);
+        }
+
+        if (isPreSharedKeyExchangeRequested()) {
+            NativeCrypto.set_SSL_psk_server_callback_enabled(ssl, true);
+            String identityHint =
+                pskCallbacks.chooseServerPSKIdentityHint(parameters.getPSKKeyManager());
+            NativeCrypto.SSL_use_psk_identity_hint(ssl, identityHint);
+        }
+
+        configureClientAuth();
+
+        if (parameters.channelIdEnabled) {
+            // Server-side TLS Channel ID
+            NativeCrypto.SSL_enable_tls_channel_id(ssl);
+        }
+
+        // setup server certificates and private keys.
+        // clients will receive a call back to request certificates.
+        String[] authMethods = NativeCrypto.getAuthenticationMethods(ssl);
+        Set<String> aliases = new HashSet<String>(authMethods.length);
+        for (String authMethod : authMethods) {
+            String type = SSLUtils.getServerX509KeyType(authMethod);
+            if (type != null) {
+                String alias = chooseServerAlias(type);
+                if (alias != null && aliases.add(alias)) {
+                    try {
+                        if (setCertificate(alias)) {
+                            // BoringSSL only supports a single cert chain. If we successfully
+                            // set a cert chain, we're done.
+                            break;
+                        }
+                    } catch (CertificateEncodingException e) {
+                        throw new IOException(e);
+                    }
+                }
+            }
+        }
+    }
+
+    private boolean isClient() {
+        return parameters.getUseClientMode();
+    }
+
+    private X509KeyManager keyManager() {
+        return parameters.getX509KeyManager();
+    }
+
+    private String chooseClientAlias(X500Principal[] issuers, String[] keyTypes) {
+        X509KeyManager keyManager = keyManager();
+        return (keyManager != null)
+            ? aliasChooser.chooseClientAlias(keyManager, issuers, keyTypes)
+            : null;
+    }
+
+    private String chooseServerAlias(String type) {
+        return aliasChooser.chooseServerAlias(keyManager(), type);
+    }
+
+    private static X500Principal[] decodeIssuers(byte[][] asn1DerEncodedPrincipals) {
+        if (asn1DerEncodedPrincipals == null) {
+            return null;
+        }
+        X500Principal[] issuers = new X500Principal[asn1DerEncodedPrincipals.length];
+        for (int i = 0; i < asn1DerEncodedPrincipals.length; i++) {
+            issuers[i] = new X500Principal(asn1DerEncodedPrincipals[i]);
+        }
+        return issuers;
+    }
+
+    /**
+     * Determines if Pre-Shared Key (PSK) key exchange is requested.
+     */
+    private boolean isPreSharedKeyExchangeRequested() {
+        if (parameters.getPSKKeyManager() == null) {
+            return false;
+        }
+
+        for (String enabledCipherSuite : parameters.enabledCipherSuites) {
+            if ((enabledCipherSuite != null) && (enabledCipherSuite.contains("PSK"))) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private boolean setCertificate(String alias) throws CertificateEncodingException, SSLException {
+        if (alias == null) {
+            return false;
+        }
+        X509KeyManager keyManager = keyManager();
+        if (keyManager == null) {
+            return false;
+        }
+        PrivateKey privateKey = keyManager.getPrivateKey(alias);
+        if (privateKey == null) {
+            return false;
+        }
+        X509Certificate[] certChain = keyManager.getCertificateChain(alias);
+        if (certChain == null) {
+            return false;
+        }
+        int numLocalCerts = certChain.length;
+        PublicKey publicKey = (numLocalCerts > 0) ? certChain[0].getPublicKey() : null;
+
+        // Encode the local certificates.
+        byte[][] encodedLocalCerts = new byte[numLocalCerts][];
+        for (int i = 0; i < numLocalCerts; ++i) {
+            encodedLocalCerts[i] = certChain[i].getEncoded();
+        }
+
+        // Convert the key so we can access a native reference.
+        final OpenSSLKey key;
+        try {
+            key = OpenSSLKey.fromPrivateKeyForTLSStackOnly(privateKey, publicKey);
+        } catch (InvalidKeyException e) {
+            throw new SSLException(e);
+        }
+
+        // Set the local certs and private key.
+        NativeCrypto.setLocalCertsAndPrivateKey(ssl, encodedLocalCerts, key.getNativeRef());
+
+        // BoringSSL only stores a single cert chain (i.e. overwrites it on each call to
+        // SSL_set_chain_and_key). We can safely store off the single instance of the certChain now,
+        // since it will match BoringSSL.
+        localCertificates = certChain;
+        return true;
+    }
+
+    private void configureClientAuth() throws SSLException {
+        // needing client auth takes priority...
+        if (parameters.getNeedClientAuth()) {
+            configureClientAuth(SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT);
+        } else if (parameters.getWantClientAuth()) {
+            configureClientAuth(SSL_VERIFY_PEER);
+        } else {
+            configureClientAuth(SSL_VERIFY_NONE);
+        }
+    }
+
+    private void configureClientAuth(int mode) throws SSLException {
+        NativeCrypto.SSL_set_verify(ssl, mode);
+
+        X509TrustManager trustManager = parameters.getX509TrustManager();
+        X509Certificate[] issuers = trustManager.getAcceptedIssuers();
+        if (issuers != null && issuers.length != 0) {
+            byte[][] issuersBytes;
+            try {
+                issuersBytes = SSLUtils.encodeIssuerX509Principals(issuers);
+            } catch (CertificateEncodingException e) {
+                throw new SSLException("Problem encoding principals", e);
+            }
+            NativeCrypto.SSL_set_client_CA_list(ssl, issuersBytes);
         }
     }
 }

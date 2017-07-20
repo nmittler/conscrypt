@@ -22,7 +22,7 @@ ext {
     androidBuildToolsVersion = "25.0.0"
 }
 
-if (androidSdkInstalled) {
+if (false) {//androidSdkInstalled) {
     apply plugin: 'com.android.library'
     apply plugin: 'com.github.dcendents.android-maven'
 

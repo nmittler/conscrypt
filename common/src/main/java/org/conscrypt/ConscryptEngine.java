@@ -90,15 +90,16 @@ import javax.net.ssl.X509ExtendedKeyManager;
 import javax.net.ssl.X509KeyManager;
 import javax.net.ssl.X509TrustManager;
 import javax.security.auth.x500.X500Principal;
+import org.conscrypt.NativeCrypto.SSLHandshakeCallbacks;
 import org.conscrypt.NativeRef.SSL_SESSION;
 import org.conscrypt.SslWrapper.BioWrapper;
 
 /**
  * Implements the {@link SSLEngine} API using OpenSSL's non-blocking interfaces.
  */
-final class ConscryptEngine extends SSLEngine implements NativeCrypto.SSLHandshakeCallbacks,
-                                                         SSLParametersImpl.AliasChooser,
-                                                         SSLParametersImpl.PSKCallbacks {
+final class ConscryptEngine extends SSLEngine implements SSLHandshakeCallbacks,
+                                                         AliasChooser,
+                                                         PSKCallbacks {
     private static final SSLEngineResult NEED_UNWRAP_OK =
             new SSLEngineResult(OK, NEED_UNWRAP, 0, 0);
     private static final SSLEngineResult NEED_UNWRAP_CLOSED =
@@ -388,7 +389,7 @@ final class ConscryptEngine extends SSLEngine implements NativeCrypto.SSLHandsha
         boolean releaseResources = true;
         try {
             // Prepare the SSL object for the handshake.
-            ssl.initialize(getHostname(), channelIdPrivateKey);
+            ssl.configure(getHostname(), channelIdPrivateKey);
 
             // For clients, offer to resume a previously cached session to avoid the
             // full TLS handshake.
@@ -1499,13 +1500,13 @@ final class ConscryptEngine extends SSLEngine implements NativeCrypto.SSLHandsha
     }
 
     @Override
-    public int clientPSKKeyRequested(String identityHint, byte[] identity, byte[] key) {
-        return ssl.clientPSKKeyRequested(identityHint, identity, key);
+    public int clientPreSharedKeyRequested(String identityHint, byte[] identity, byte[] key) {
+        return ssl.clientPreSharedKeyRequested(identityHint, identity, key);
     }
 
     @Override
-    public int serverPSKKeyRequested(String identityHint, String identity, byte[] key) {
-        return ssl.serverPSKKeyRequested(identityHint, identity, key);
+    public int serverPreSharedKeyRequested(String identityHint, String identity, byte[] key) {
+        return ssl.serverPreSharedKeyRequested(identityHint, identity, key);
     }
 
     @Override

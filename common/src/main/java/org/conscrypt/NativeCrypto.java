@@ -432,8 +432,7 @@ public final class NativeCrypto {
     static native int get_X509_ex_flags(long x509ctx);
 
     // Used by Android platform TrustedCertificateStore.
-    @SuppressWarnings("unused")
-    static native int X509_check_issued(long ctx, long ctx2);
+    @SuppressWarnings("unused") static native int X509_check_issued(long ctx, long ctx2);
 
     // --- PKCS7 ---------------------------------------------------------------
 
@@ -847,8 +846,8 @@ public final class NativeCrypto {
      * @param pkey a reference to the private key.
      * @throws SSLException if a problem occurs setting the cert/key.
      */
-    static native void setLocalCertsAndPrivateKey(long ssl, byte[][] encodedCertificates,
-        NativeRef.EVP_PKEY pkey) throws SSLException;
+    static native void setLocalCertsAndPrivateKey(
+            long ssl, byte[][] encodedCertificates, NativeRef.EVP_PKEY pkey) throws SSLException;
 
     static native void SSL_set_client_CA_list(long ssl, byte[][] asn1DerEncodedX500Principals)
             throws SSLException;
@@ -858,6 +857,10 @@ public final class NativeCrypto {
     static native long SSL_set_options(long ssl, long options);
 
     static native long SSL_clear_options(long ssl, long options);
+
+    static native void enableSessionTickets(long ssl, boolean enable);
+
+    static native String[] getAuthenticationMethods(long ssl);
 
     static native void SSL_enable_signed_cert_timestamps(long ssl);
 
@@ -965,7 +968,7 @@ public final class NativeCrypto {
 
     static void setEnabledCipherSuites(long ssl, String[] cipherSuites) {
         checkEnabledCipherSuites(cipherSuites);
-        List<String> opensslSuites = new ArrayList<String>();
+        List<String> opensslSuites = new ArrayList<String>(cipherSuites.length);
         for (int i = 0; i < cipherSuites.length; i++) {
             String cipherSuite = cipherSuites[i];
             if (cipherSuite.equals(TLS_EMPTY_RENEGOTIATION_INFO_SCSV)) {
@@ -1020,10 +1023,6 @@ public final class NativeCrypto {
 
     static native void SSL_set_session_creation_enabled(
             long sslNativePointer, boolean creationEnabled) throws SSLException;
-
-    static native boolean SSL_session_reused(long sslNativePointer);
-
-    static native void SSL_accept_renegotiations(long sslNativePointer) throws SSLException;
 
     static native void SSL_set_tlsext_host_name(long sslNativePointer, String hostname)
             throws SSLException;
@@ -1108,7 +1107,7 @@ public final class NativeCrypto {
          *
          * @throws CertificateException if the certificate is untrusted
          */
-        @SuppressWarnings("unused")
+        @SuppressWarnings("unused") // Called from native code.
         void verifyCertificateChain(byte[][] certificateChain, String authMethod)
                 throws CertificateException;
 
@@ -1123,9 +1122,9 @@ public final class NativeCrypto {
          * convertible to strings with #keyType
          * @param asn1DerEncodedX500Principals CAs known to the server
          */
-        @SuppressWarnings("unused")
+        @SuppressWarnings("unused") // Called from native code.
         void clientCertificateRequested(byte[] keyTypes, byte[][] asn1DerEncodedX500Principals)
-                throws CertificateEncodingException, SSLException;
+                throws CertificateEncodingException, SSLException, CertificateEncodingException;
 
         /**
          * Gets the key to be used in client mode for this connection in Pre-Shared Key (PSK) key
@@ -1140,7 +1139,8 @@ public final class NativeCrypto {
          * @return number of bytes this method stored in the {@code key} buffer or {@code 0} if an
          *         error occurred in which case the handshake will be aborted.
          */
-        int clientPSKKeyRequested(String identityHint, byte[] identity, byte[] key);
+        @SuppressWarnings("unused") // Called from native code.
+        int clientPreSharedKeyRequested(String identityHint, byte[] identity, byte[] key);
 
         /**
          * Gets the key to be used in server mode for this connection in Pre-Shared Key (PSK) key
@@ -1154,19 +1154,20 @@ public final class NativeCrypto {
          * @return number of bytes this method stored in the {@code key} buffer or {@code 0} if an
          *         error occurred in which case the handshake will be aborted.
          */
-        int serverPSKKeyRequested(String identityHint, String identity, byte[] key);
+        @SuppressWarnings("unused") // Called from native code.
+        int serverPreSharedKeyRequested(String identityHint, String identity, byte[] key);
 
         /**
          * Called when SSL state changes. This could be handshake completion.
          */
-        @SuppressWarnings("unused")
+        @SuppressWarnings("unused") // Called from native code.
         void onSSLStateChange(int type, int val);
 
         /**
          * Called when a new session has been established and may be added to the session cache.
          * The callee is responsible for incrementing the reference count on the returned session.
          */
-        @SuppressWarnings("unused")
+        @SuppressWarnings("unused") // Called from native code.
         void onNewSessionEstablished(long sslSessionNativePtr);
 
         /**
@@ -1180,11 +1181,9 @@ public final class NativeCrypto {
          * @param id the ID of the session to find.
          * @return the cached session or {@code 0} if no session was found matching the given ID.
          */
-        @SuppressWarnings("unused")
+        @SuppressWarnings("unused") // Called from native code.
         long serverSessionRequested(byte[] id);
     }
-
-    static native String SSL_CIPHER_get_kx_name(long cipherAddress);
 
     static native String[] get_cipher_names(String selection);
 
@@ -1265,24 +1264,10 @@ public final class NativeCrypto {
             SSLHandshakeCallbacks shc) throws IOException;
 
     /**
-     * Writes data from the given array to the BIO.
-     */
-    static native int ENGINE_SSL_write_BIO_heap(long sslRef, long bioRef, byte[] sourceJava,
-            int sourceOffset, int sourceLength, SSLHandshakeCallbacks shc)
-            throws IOException, IndexOutOfBoundsException;
-
-    /**
      * Reads data from the given BIO into a direct {@link java.nio.ByteBuffer}.
      */
     static native int ENGINE_SSL_read_BIO_direct(long sslRef, long bioRef, long address, int len,
             SSLHandshakeCallbacks shc) throws IOException;
-
-    /**
-     * Reads data from the given BIO into an array.
-     */
-    static native int ENGINE_SSL_read_BIO_heap(long sslRef, long bioRef, byte[] destJava,
-            int destOffset, int destLength, SSLHandshakeCallbacks shc)
-            throws IOException, IndexOutOfBoundsException;
 
     /**
      * Variant of the {@link #SSL_shutdown} used by {@link ConscryptEngine}. This version does not

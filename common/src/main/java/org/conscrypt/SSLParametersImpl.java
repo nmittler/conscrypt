@@ -414,30 +414,6 @@ final class SSLParametersImpl implements Cloneable {
     }
 
     /**
-     * For abstracting the X509KeyManager calls between
-     * {@link X509KeyManager#chooseClientAlias(String[], java.security.Principal[], java.net.Socket)}
-     * and
-     * {@link X509ExtendedKeyManager#chooseEngineClientAlias(String[], java.security.Principal[], javax.net.ssl.SSLEngine)}
-     */
-    interface AliasChooser {
-        String chooseClientAlias(X509KeyManager keyManager, X500Principal[] issuers,
-                String[] keyTypes);
-
-        String chooseServerAlias(X509KeyManager keyManager, String keyType);
-    }
-
-    /**
-     * For abstracting the {@code PSKKeyManager} calls between those taking an {@code SSLSocket} and
-     * those taking an {@code SSLEngine}.
-     */
-    @SuppressWarnings("deprecation") // PSKKeyManager is deprecated, but in our own package
-    interface PSKCallbacks {
-        String chooseServerPSKIdentityHint(PSKKeyManager keyManager);
-        String chooseClientPSKIdentity(PSKKeyManager keyManager, String identityHint);
-        SecretKey getPSKKey(PSKKeyManager keyManager, String identityHint, String identity);
-    }
-
-    /**
      * Returns the clone of this object.
      * @return the clone.
      */
