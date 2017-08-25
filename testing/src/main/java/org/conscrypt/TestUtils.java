@@ -219,7 +219,7 @@ public final class TestUtils {
         return serverContext.getServerSocketFactory();
     }
 
-    private static SSLContext newContext(Provider provider) {
+    static SSLContext newContext(Provider provider) {
         try {
             return SSLContext.getInstance("TLS", provider);
         } catch (NoSuchAlgorithmException e) {
