@@ -18,17 +18,12 @@ package org.conscrypt;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assume.assumeFalse;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
-import java.util.Arrays;
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -60,9 +55,8 @@ public class RenegotiationTest {
     private static final ByteBuffer EMPTY_BUFFER = ByteBuffer.allocateDirect(0);
     private static final String[] PROTOCOLS = new String[] {"TLSv1.2"};
     private static final SSLContext CONSCRYPT_CLIENT_CONTEXT = getConscryptClientContext();
-    private static final SSLContext JDK_CLIENT_CONTEXT = getJdkClientContext();
     private static final SSLContext JDK_SERVER_CONTEXT = getJdkServerContext();
-    private static final String[] CIPHERS = getCipherSuites();
+    private static final String[] CIPHERS = TestUtils.getCommonCipherSuites();
     private static final String RENEGOTIATION_CIPHER = CIPHERS[CIPHERS.length - 1];
     private static final byte[] MESSAGE_BYTES = "Hello".getBytes(TestUtils.UTF_8);
     private static final ByteBuffer MESSAGE_BUFFER = ByteBuffer.wrap(MESSAGE_BYTES);
@@ -133,39 +127,9 @@ public class RenegotiationTest {
         return TestUtils.initSslContext(context, TestKeyStore.getClient());
     }
 
-    private static SSLContext getJdkClientContext() {
-        SSLContext context = TestUtils.newContext(TestUtils.getJdkProvider());
-        return TestUtils.initSslContext(context, TestKeyStore.getClient());
-    }
-
     private static SSLContext getJdkServerContext() {
         SSLContext context = TestUtils.newContext(TestUtils.getJdkProvider());
         return TestUtils.initSslContext(context, TestKeyStore.getServer());
-    }
-
-    private static String[] getCipherSuites() {
-        Set<String> supported1 = getCiphers(JDK_CLIENT_CONTEXT);
-        Set<String> supported2 = getCiphers(JDK_SERVER_CONTEXT);
-        Set<String> supported3 = getCiphers(CONSCRYPT_CLIENT_CONTEXT);
-        supported1.retainAll(supported2);
-        supported1.retainAll(supported3);
-        filterCiphers(supported1);
-        return supported1.toArray(new String[supported1.size()]);
-    }
-
-    private static Set<String> getCiphers(SSLContext ctx) {
-        return new HashSet<String>(Arrays.asList(ctx.getDefaultSSLParameters().getCipherSuites()));
-    }
-
-    private static void filterCiphers(Set<String> ciphers) {
-        // Filter all non-TLS ciphers.
-        Iterator<String> iter = ciphers.iterator();
-        while (iter.hasNext()) {
-            String cipher = iter.next();
-            if (cipher.startsWith("SSL_") || cipher.contains("_RC4_")) {
-                iter.remove();
-            }
-        }
     }
 
     private static final class Client {

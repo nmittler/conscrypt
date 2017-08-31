@@ -31,6 +31,11 @@ import java.nio.charset.Charset;
 import java.security.NoSuchAlgorithmException;
 import java.security.Provider;
 import java.security.Security;
+import java.util.Arrays;
+import java.util.Iterator;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLEngine;
 import javax.net.ssl.SSLEngineResult;
@@ -68,7 +73,7 @@ public final class TestUtils {
                 return p;
             }
         }
-        //throw new RuntimeException("Unable to find a default provider for " + PROVIDER_PROPERTY);
+        // throw new RuntimeException("Unable to find a default provider for " + PROVIDER_PROPERTY);
         // For Java 1.6
         return new BouncyCastleProvider();
     }
@@ -117,9 +122,7 @@ public final class TestUtils {
 
     public static Provider getConscryptProvider() {
         try {
-            return (Provider) conscryptClass("OpenSSLProvider")
-                .getConstructor()
-                .newInstance();
+            return (Provider) conscryptClass("OpenSSLProvider").getConstructor().newInstance();
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
@@ -153,7 +156,7 @@ public final class TestUtils {
      */
     public static Class<?> conscryptClass(String simpleName) throws ClassNotFoundException {
         ClassNotFoundException ex = null;
-        for (String packageName : new String[]{"org.conscrypt", "com.android.org.conscrypt"}) {
+        for (String packageName : new String[] {"org.conscrypt", "com.android.org.conscrypt"}) {
             String name = packageName + "." + simpleName;
             try {
                 return Class.forName(name);
@@ -179,10 +182,12 @@ public final class TestUtils {
         return getServerSocketFactory(JDK_PROVIDER);
     }
 
-    static SSLSocketFactory setUseEngineSocket(SSLSocketFactory conscryptFactory, boolean useEngineSocket) {
+    static SSLSocketFactory setUseEngineSocket(
+            SSLSocketFactory conscryptFactory, boolean useEngineSocket) {
         try {
             Class<?> clazz = conscryptClass("Conscrypt$SocketFactories");
-            Method method = clazz.getMethod("setUseEngineSocket", SSLSocketFactory.class, boolean.class);
+            Method method =
+                    clazz.getMethod("setUseEngineSocket", SSLSocketFactory.class, boolean.class);
             method.invoke(null, conscryptFactory, useEngineSocket);
             return conscryptFactory;
         } catch (Exception e) {
@@ -190,10 +195,12 @@ public final class TestUtils {
         }
     }
 
-    static SSLServerSocketFactory setUseEngineSocket(SSLServerSocketFactory conscryptFactory, boolean useEngineSocket) {
+    static SSLServerSocketFactory setUseEngineSocket(
+            SSLServerSocketFactory conscryptFactory, boolean useEngineSocket) {
         try {
             Class<?> clazz = conscryptClass("Conscrypt$ServerSocketFactories");
-            Method method = clazz.getMethod("setUseEngineSocket", SSLServerSocketFactory.class, boolean.class);
+            Method method = clazz.getMethod(
+                    "setUseEngineSocket", SSLServerSocketFactory.class, boolean.class);
             method.invoke(null, conscryptFactory, useEngineSocket);
             return conscryptFactory;
         } catch (Exception e) {
@@ -224,6 +231,35 @@ public final class TestUtils {
             return SSLContext.getInstance("TLS", provider);
         } catch (NoSuchAlgorithmException e) {
             throw new RuntimeException(e);
+        }
+    }
+
+    static String[] getCommonCipherSuites() {
+        SSLContext jdkContext =
+                TestUtils.initSslContext(newContext(getJdkProvider()), TestKeyStore.getClient());
+        SSLContext conscryptContext = TestUtils.initSslContext(
+                newContext(getConscryptProvider()), TestKeyStore.getClient());
+        Set<String> supported = new LinkedHashSet<String>();
+        supported.addAll(supportedCiphers(jdkContext));
+        supported.retainAll(supportedCiphers(conscryptContext));
+        filterCiphers(supported);
+
+        return supported.toArray(new String[supported.size()]);
+    }
+
+    private static List<String> supportedCiphers(SSLContext ctx) {
+        return Arrays.asList(ctx.getDefaultSSLParameters().getCipherSuites());
+    }
+
+    private static void filterCiphers(Iterable<String> ciphers) {
+        // Filter all non-TLS ciphers.
+        Iterator<String> iter = ciphers.iterator();
+        while (iter.hasNext()) {
+            String cipher = iter.next();
+            if (cipher.startsWith("SSL_") || cipher.startsWith("TLS_EMPTY")
+                    || cipher.contains("_RC4_")) {
+                iter.remove();
+            }
         }
     }
 
@@ -308,10 +344,12 @@ public final class TestUtils {
      * Performs the intial TLS handshake between the two {@link SSLEngine} instances.
      */
     public static void doEngineHandshake(SSLEngine clientEngine, SSLEngine serverEngine,
-            ByteBuffer clientAppBuffer, ByteBuffer clientPacketBuffer, ByteBuffer serverAppBuffer,
-            ByteBuffer serverPacketBuffer) throws SSLException {
-        clientEngine.beginHandshake();
-        serverEngine.beginHandshake();
+        ByteBuffer clientAppBuffer, ByteBuffer clientPacketBuffer, ByteBuffer serverAppBuffer,
+        ByteBuffer serverPacketBuffer, boolean beginHandshake) throws SSLException {
+        if (beginHandshake) {
+            clientEngine.beginHandshake();
+            serverEngine.beginHandshake();
+        }
 
         SSLEngineResult clientResult;
         SSLEngineResult serverResult;
@@ -362,9 +400,9 @@ public final class TestUtils {
             assertEquals(serverPacketBuffer.position() - sTOcPos, clientResult.bytesConsumed());
             assertEquals(clientPacketBuffer.position() - cTOsPos, serverResult.bytesConsumed());
             assertEquals(clientAppBuffer.position() - clientAppReadBufferPos,
-                    clientResult.bytesProduced());
+                clientResult.bytesProduced());
             assertEquals(serverAppBuffer.position() - serverAppReadBufferPos,
-                    serverResult.bytesProduced());
+                serverResult.bytesProduced());
 
             clientPacketBuffer.compact();
             serverPacketBuffer.compact();
