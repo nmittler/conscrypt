@@ -16,6 +16,8 @@
 
 package org.conscrypt;
 
+import static org.conscrypt.NativeConstants.SSL_CB_HANDSHAKE_DONE;
+import static org.conscrypt.NativeConstants.SSL_CB_HANDSHAKE_START;
 import static org.conscrypt.SSLUtils.EngineStates.STATE_CLOSED;
 import static org.conscrypt.SSLUtils.EngineStates.STATE_HANDSHAKE_STARTED;
 import static org.conscrypt.SSLUtils.EngineStates.STATE_NEW;
@@ -315,24 +317,33 @@ final class ConscryptFileDescriptorSocket extends OpenSSLSocketImpl
     @Override
     @SuppressWarnings("unused") // used by NativeCrypto.SSLHandshakeCallbacks / info_callback
     public void onSSLStateChange(int type, int val) {
-        if (type != NativeConstants.SSL_CB_HANDSHAKE_DONE) {
-            // We only care about successful completion.
-            return;
-        }
-
-        // The handshake has completed successfully ...
-
-        // First, update the state.
         synchronized (ssl) {
             if (state == STATE_CLOSED) {
                 // Someone called "close" but the handshake hasn't been interrupted yet.
                 return;
             }
 
-            // Now that we've fixed up our state, we can tell waiting threads that
-            // we're ready.
-            state = STATE_READY;
+            switch (type) {
+                case SSL_CB_HANDSHAKE_START: {
+                    // For clients, this will allow the NEED_UNWRAP status to be
+                    // returned.
+                    //state = STATE_HANDSHAKE_STARTED;
+                    return;
+                }
+                case SSL_CB_HANDSHAKE_DONE: {
+                    // Now that we've fixed up our state, we can tell waiting threads that
+                    // we're ready.
+                    state = STATE_READY;
+                    break;
+                }
+                default: {
+                    // Ignore
+                    return;
+                }
+            }
         }
+
+        // The handshake has completed successfully ...
 
         // Let listeners know we are finally done
         notifyHandshakeCompletedListeners();
@@ -532,6 +543,7 @@ final class ConscryptFileDescriptorSocket extends OpenSSLSocketImpl
 
                 int ret =  ssl.read(
                         Platform.getFileDescriptor(socket), buf, offset, byteCount, getSoTimeout());
+                System.err.println("NM: FD socket read returned " + ret);
                 if (ret == -1) {
                     synchronized (ssl) {
                         if (state == STATE_CLOSED) {

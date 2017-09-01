@@ -19,11 +19,15 @@ package org.conscrypt;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 
+import java.io.EOFException;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
+import java.util.Arrays;
+import java.util.LinkedHashSet;
+import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -33,6 +37,7 @@ import java.util.concurrent.TimeoutException;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLEngine;
 import javax.net.ssl.SSLEngineResult;
+import javax.net.ssl.SSLEngineResult.HandshakeStatus;
 import javax.net.ssl.SSLEngineResult.Status;
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
@@ -54,13 +59,11 @@ import org.junit.runners.Parameterized.Parameters;
 public class RenegotiationTest {
     private static final ByteBuffer EMPTY_BUFFER = ByteBuffer.allocateDirect(0);
     private static final String[] PROTOCOLS = new String[] {"TLSv1.2"};
-    private static final SSLContext CONSCRYPT_CLIENT_CONTEXT = getConscryptClientContext();
-    private static final SSLContext JDK_SERVER_CONTEXT = getJdkServerContext();
     private static final String[] CIPHERS = TestUtils.getCommonCipherSuites();
-    private static final String RENEGOTIATION_CIPHER = CIPHERS[CIPHERS.length - 1];
     private static final byte[] MESSAGE_BYTES = "Hello".getBytes(TestUtils.UTF_8);
-    private static final ByteBuffer MESSAGE_BUFFER = ByteBuffer.wrap(MESSAGE_BYTES);
+    private static final ByteBuffer MESSAGE_BUFFER = ByteBuffer.wrap(MESSAGE_BYTES).asReadOnlyBuffer();
     private static final int MESSAGE_LENGTH = MESSAGE_BYTES.length;
+    private static final int NUM_REPLIES = 1;
 
     public enum SocketType {
         FILE_DESCRIPTOR {
@@ -81,9 +84,10 @@ public class RenegotiationTest {
 
     @Parameters(name = "{0}")
     public static Object[] data() {
+        //return new Object[] {SocketType.ENGINE};
         return new Object[] {SocketType.FILE_DESCRIPTOR};
-        // TODO(nmittler): replace once https://github.com/google/conscrypt/issues/310 is fixed.
         //return new Object[] {SocketType.FILE_DESCRIPTOR, SocketType.ENGINE};
+        //return new Object[] {SocketType.ENGINE, SocketType.FILE_DESCRIPTOR};
     }
 
     @Parameter public SocketType socketType;
@@ -109,11 +113,13 @@ public class RenegotiationTest {
         server.stop();
     }
 
-    @Test(timeout = 10000)
+    @Test
     public void test() throws Exception {
         client.sendMessage();
-        Thread.sleep(100);
-        client.readMessage();
+
+        Future<?> repliesFuture = client.readReplies();
+        server.await(5, TimeUnit.SECONDS);
+        repliesFuture.get(5, TimeUnit.SECONDS);
 
         // BoringSSL will not call the verify callback on renegotiation, so the client will never
         // see the new cipher. This means there's nothing specific we can test at the application
@@ -122,22 +128,29 @@ public class RenegotiationTest {
         // assertEquals(RENEGOTIATION_CIPHER, client.socket.getSession().getCipherSuite());
     }
 
-    private static SSLContext getConscryptClientContext() {
+    private static SSLContext newConscryptClientContext() {
         SSLContext context = TestUtils.newContext(TestUtils.getConscryptProvider());
         return TestUtils.initSslContext(context, TestKeyStore.getClient());
     }
 
-    private static SSLContext getJdkServerContext() {
+    /*private static SSLContext newJdkClientContext() {
+        SSLContext context = TestUtils.newContext(TestUtils.getJdkProvider());
+        return TestUtils.initSslContext(context, TestKeyStore.getClient());
+    }*/
+
+    private static SSLContext newJdkServerContext() {
         SSLContext context = TestUtils.newContext(TestUtils.getJdkProvider());
         return TestUtils.initSslContext(context, TestKeyStore.getServer());
     }
 
     private static final class Client {
         private final SSLSocket socket;
+        private ExecutorService executor;
+        private volatile boolean stopping;
 
         Client(boolean useEngineSocket, int port) {
             try {
-                SSLSocketFactory socketFactory = CONSCRYPT_CLIENT_CONTEXT.getSocketFactory();
+                SSLSocketFactory socketFactory = newConscryptClientContext().getSocketFactory();
                 Conscrypt.SocketFactories.setUseEngineSocket(socketFactory, useEngineSocket);
                 socket = (SSLSocket) socketFactory.createSocket(
                         TestUtils.getLoopbackAddress(), port);
@@ -150,6 +163,7 @@ public class RenegotiationTest {
 
         void start() {
             try {
+                executor = Executors.newSingleThreadExecutor();
                 socket.startHandshake();
             } catch (IOException e) {
                 e.printStackTrace();
@@ -159,21 +173,42 @@ public class RenegotiationTest {
 
         void stop() {
             try {
+                stopping = true;
                 socket.close();
-            } catch (IOException e) {
+
+                if (executor != null) {
+                    executor.shutdown();
+                    executor.awaitTermination(5, TimeUnit.SECONDS);
+                    executor = null;
+                }
+            } catch (RuntimeException e) {
+                throw e;
+            } catch (Exception e) {
                 throw new RuntimeException(e);
             }
         }
 
-        void readMessage() throws IOException {
+        Future<?> readReplies() {
+            return executor.submit(new Runnable() {
+                @Override
+                public void run() {
+                    // Read all the replies, dealing with renegotiations silently as we go.
+                    for(int i = 0; !stopping && i < NUM_REPLIES; ++i) {
+                        readReply();
+                    }
+                }
+            });
+        }
+
+        private void readReply() {
             try {
                 byte[] buffer = new byte[MESSAGE_LENGTH];
                 int totalBytesRead = 0;
-                while (totalBytesRead < buffer.length) {
-                    int remaining = buffer.length - totalBytesRead;
+                while (totalBytesRead < MESSAGE_LENGTH) {
+                    int remaining = MESSAGE_LENGTH - totalBytesRead;
                     int bytesRead = socket.getInputStream().read(buffer, totalBytesRead, remaining);
                     if (bytesRead == -1) {
-                        break;
+                        throw new EOFException();
                     }
                     totalBytesRead += bytesRead;
                 }
@@ -202,6 +237,7 @@ public class RenegotiationTest {
         private final ByteBuffer inboundPacketBuffer;
         private final ByteBuffer inboundAppBuffer;
         private final ByteBuffer outboundPacketBuffer;
+        private final Set<String> ciphers = new LinkedHashSet<String>(Arrays.asList(CIPHERS));
         private SocketChannel channel;
         private ExecutorService executor;
         private volatile boolean stopping;
@@ -210,7 +246,7 @@ public class RenegotiationTest {
         Server() throws IOException {
             serverChannel = ServerSocketChannel.open();
             serverChannel.bind(new InetSocketAddress(TestUtils.getLoopbackAddress(), 0));
-            engine = JDK_SERVER_CONTEXT.createSSLEngine();
+            engine = newJdkServerContext().createSSLEngine();
             engine.setEnabledProtocols(PROTOCOLS);
             engine.setEnabledCipherSuites(CIPHERS);
             engine.setUseClientMode(false);
@@ -228,6 +264,10 @@ public class RenegotiationTest {
             return executor.submit(new AcceptTask());
         }
 
+        void await(long timeout, TimeUnit unit) throws InterruptedException, ExecutionException, TimeoutException {
+            echoFuture.get(timeout, unit);
+        }
+
         void stop() {
             try {
                 stopping = true;
@@ -235,10 +275,6 @@ public class RenegotiationTest {
                 if (channel != null) {
                     channel.close();
                     channel = null;
-                }
-
-                if (echoFuture != null) {
-                    echoFuture.get(5, TimeUnit.SECONDS);
                 }
 
                 serverChannel.close();
@@ -251,10 +287,6 @@ public class RenegotiationTest {
             } catch (IOException e) {
                 throw new RuntimeException(e);
             } catch (InterruptedException e) {
-                throw new RuntimeException(e);
-            } catch (ExecutionException e) {
-                throw new RuntimeException(e);
-            } catch (TimeoutException e) {
                 throw new RuntimeException(e);
             }
         }
@@ -295,8 +327,10 @@ public class RenegotiationTest {
             public void run() {
                 try {
                     readMessage();
-                    renegotiate();
-                    reply();
+                    for (int i = 0; !stopping && i < NUM_REPLIES; ++i) {
+                        renegotiate();
+                        reply();
+                    }
                 } catch (Throwable e) {
                     e.printStackTrace();
                     throw new RuntimeException(e);
@@ -304,98 +338,129 @@ public class RenegotiationTest {
             }
 
             private void renegotiate() throws Exception {
-                engine.setEnabledCipherSuites(new String[] {RENEGOTIATION_CIPHER});
+                // Remove the current cipher from the set and renegotiate to force a new
+                // cipher to be selected.
+                String currentCipher = engine.getSession().getCipherSuite();
+                ciphers.remove(currentCipher);
+                engine.setEnabledCipherSuites(ciphers.toArray(new String[ciphers.size()]));
+
+                System.err.println("NM: renegotiating with ciphers=" + ciphers);
                 doHandshake();
             }
 
             private void reply() throws IOException {
-                SSLEngineResult result = wrap(MESSAGE_BUFFER);
+                SSLEngineResult result = wrap(newMessage());
                 if (result.getStatus() != Status.OK) {
                     throw new RuntimeException("Wrap failed. Status: " + result.getStatus());
                 }
             }
 
+            private ByteBuffer newMessage() {
+                return MESSAGE_BUFFER.duplicate();
+            }
+
             private void readMessage() throws IOException {
                 int totalProduced = 0;
-                while (true) {
+                while (!stopping) {
                     SSLEngineResult result = unwrap();
-                    switch (result.getStatus()) {
-                        case BUFFER_UNDERFLOW:
-                        case OK: {
-                            totalProduced += result.bytesProduced();
-                            if (totalProduced == MESSAGE_LENGTH) {
-                                return;
-                            }
-                            break;
-                        }
-                        default: {
-                            throw new RuntimeException(
-                                    "Unwrap failed with unexpected status: " + result.getStatus());
-                        }
+                    if (result.getStatus() != Status.OK) {
+                        throw new RuntimeException(
+                                "Failed reading message: " + result);
+                    }
+                    totalProduced += result.bytesProduced();
+                    if (totalProduced == MESSAGE_LENGTH) {
+                        return;
                     }
                 }
             }
         }
 
         private SSLEngineResult wrap(ByteBuffer src) throws IOException {
+            outboundPacketBuffer.clear();
+
             // Check if the engine has bytes to wrap.
             SSLEngineResult result = engine.wrap(src, outboundPacketBuffer);
-            runDelegatedTasks(result, engine);
+            System.err.println("NM: server wrap result=" + result);
 
             // Write any wrapped bytes to the socket.
             outboundPacketBuffer.flip();
-            channel.write(outboundPacketBuffer);
-            outboundPacketBuffer.clear();
+
+            do {
+                channel.write(outboundPacketBuffer);
+            } while (outboundPacketBuffer.hasRemaining());
 
             return result;
         }
 
         private SSLEngineResult unwrap() throws IOException {
             // Unwrap any available bytes from the socket.
-            channel.read(inboundPacketBuffer);
-            inboundPacketBuffer.flip();
-            SSLEngineResult result = engine.unwrap(inboundPacketBuffer, inboundAppBuffer);
-            runDelegatedTasks(result, engine);
+            SSLEngineResult result = null;
+            boolean done = false;
+            while (!done) {
+                if (channel.read(inboundPacketBuffer) == -1) {
+                    throw new EOFException();
+                }
+                // Just clear the app buffer - we don't really use it.
+                inboundAppBuffer.clear();
+                inboundPacketBuffer.flip();
+                result = engine.unwrap(inboundPacketBuffer, inboundAppBuffer);
+                System.err.println("NM: server unwrap result=" + result);
+                switch(result.getStatus()) {
+                    case BUFFER_UNDERFLOW:
+                        // Continue reading from the socket in a moment.
+                        try {
+                            Thread.sleep(10);
+                        } catch (InterruptedException e) {
+                            throw new RuntimeException(e);
+                        }
+                        break;
+                    case OK:
+                        done = true;
+                        break;
+                    default: {
+                        throw new RuntimeException("Unexpected unwrap result: " + result);
+                    }
+                }
 
-            inboundPacketBuffer.compact();
+                // Compact for the next socket read.
+                inboundPacketBuffer.compact();
+            }
             return result;
         }
 
         private void doHandshake() throws IOException {
             engine.beginHandshake();
 
-            boolean serverHandshakeFinished = false;
-
-            do {
-                // Check if the engine has bytes to wrap.
-                SSLEngineResult result = wrap(EMPTY_BUFFER);
-
-                if (isHandshakeFinished(result)) {
-                    serverHandshakeFinished = true;
-                }
-
-                // Unwrap any available bytes from the socket.
-                result = unwrap();
-
-                if (isHandshakeFinished(result)) {
-                    serverHandshakeFinished = true;
-                }
-            } while (!serverHandshakeFinished);
-        }
-
-        private boolean isHandshakeFinished(SSLEngineResult result) {
-            return result.getHandshakeStatus() == SSLEngineResult.HandshakeStatus.FINISHED;
-        }
-
-        private void runDelegatedTasks(SSLEngineResult result, SSLEngine engine) {
-            if (result.getHandshakeStatus() == SSLEngineResult.HandshakeStatus.NEED_TASK) {
-                for (;;) {
-                    Runnable task = engine.getDelegatedTask();
-                    if (task == null) {
+            boolean done = false;
+            while (!done){
+                switch (engine.getHandshakeStatus()) {
+                    case NEED_WRAP: {
+                        wrap(EMPTY_BUFFER);
                         break;
                     }
-                    task.run();
+                    case NEED_UNWRAP: {
+                        unwrap();
+                        break;
+                    }
+                    case NEED_TASK: {
+                        runDelegatedTasks();
+                        break;
+                    }
+                    default: {
+                        done = true;
+                        break;
+                    }
                 }
+            }
+        }
+
+        private void runDelegatedTasks() {
+            for (;;) {
+                Runnable task = engine.getDelegatedTask();
+                if (task == null) {
+                    break;
+                }
+                task.run();
             }
         }
     }
