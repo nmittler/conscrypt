@@ -122,6 +122,19 @@ public final class NativeCrypto {
     static native int RSA_private_decrypt(int flen, byte[] from, byte[] to, NativeRef.EVP_PKEY pkey,
             int padding) throws BadPaddingException, SignatureException;
 
+    static native int RSA_private_encrypt_direct(long inputAddress, int inputLen,
+            long outputAddress, NativeRef.EVP_PKEY pkey, int padding);
+
+    static native int RSA_public_decrypt_direct(long inputAddress, int inputLen, long outputAddress,
+            NativeRef.EVP_PKEY pkey, int padding) throws BadPaddingException, SignatureException;
+
+    static native int RSA_public_encrypt_direct(long inputAddress, int inputLen, long outputAddress,
+            NativeRef.EVP_PKEY pkey, int padding);
+
+    static native int RSA_private_decrypt_direct(long inputAddress, int inputLen,
+            long outputAddress, NativeRef.EVP_PKEY pkey, int padding)
+            throws BadPaddingException, SignatureException;
+
     /**
      * @return array of {n, e}
      */
@@ -314,6 +327,16 @@ public final class NativeCrypto {
 
     static native int EVP_AEAD_CTX_open(long evpAead, byte[] key, int tagLengthInBytes, byte[] out,
             int outOffset, byte[] nonce, byte[] in, int inOffset, int inLength, byte[] ad)
+            throws BadPaddingException, IndexOutOfBoundsException;
+
+    static native int EVP_AEAD_CTX_seal_direct(long evpAead, long keyAddress, int keyLength,
+            int tagLenInBytes, long outAddress, int outLength, long nonceAddress, int nonceLength,
+            long inAddress, int inLength, long aadAddress, int aadLength)
+            throws BadPaddingException, IndexOutOfBoundsException;
+
+    static native int EVP_AEAD_CTX_open_direct(long evpAead, long keyAddress, int keyLength,
+            int tagLenInBytes, long outAddress, int outLength, long nonceAddress, int nonceLength,
+            long inAddress, int inLength, long aadAddress, int aadLength)
             throws BadPaddingException, IndexOutOfBoundsException;
 
     // --- HMAC functions ------------------------------------------------------
@@ -1264,7 +1287,7 @@ public final class NativeCrypto {
      *
      * @return if positive, represents the number of bytes read into the given buffer.
      * Returns {@code -SSL_ERROR_WANT_READ} if more data is needed. Returns
-     * {@code -SSL_ERROR_WANT_WRITE} if data needs to be written out to flush the BIO.
+     * {@code -SSL_ERROR_WANT_WRITE} if data needs to be written outputBuffer to flush the BIO.
      *
      * @throws java.io.InterruptedIOException if the read was interrupted.
      * @throws java.io.EOFException if the end of stream has been reached.

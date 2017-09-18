@@ -16,7 +16,9 @@
 
 package org.conscrypt;
 
+import java.nio.ByteBuffer;
 import java.security.AlgorithmParameters;
+import java.security.GeneralSecurityException;
 import java.security.InvalidAlgorithmParameterException;
 import java.security.InvalidKeyException;
 import java.security.InvalidParameterException;
@@ -71,18 +73,25 @@ abstract class OpenSSLCipherRSA extends CipherSpi {
     /**
      * Buffer for operations
      */
-    private byte[] buffer;
+    //private byte[] buffer;
+    ByteBuffer inputBuffer;
+    ByteBuffer outputBuffer;
+
 
     /**
      * Current offset in the buffer.
      */
-    private int bufferOffset;
+    //private int bufferOffset;
 
     /**
      * Flag that indicates an exception should be thrown when the input is too
      * large during doFinal.
      */
+    private int bufferSize;
+    private int totalInputBytes;
     private boolean inputTooLarge;
+    private long inputBufferAddress;
+    private long outputBufferAddress;
 
     /**
      * Current padding mode
@@ -171,7 +180,7 @@ abstract class OpenSSLCipherRSA extends CipherSpi {
         throws InvalidAlgorithmParameterException, InvalidKeyException {}
 
     void engineInitInternal(int opmode, Key key, AlgorithmParameterSpec spec)
-            throws InvalidKeyException, InvalidAlgorithmParameterException {
+        throws InvalidKeyException, InvalidAlgorithmParameterException {
         if (opmode == Cipher.ENCRYPT_MODE || opmode == Cipher.WRAP_MODE) {
             encrypting = true;
         } else if (opmode == Cipher.DECRYPT_MODE || opmode == Cipher.UNWRAP_MODE) {
@@ -204,15 +213,43 @@ abstract class OpenSSLCipherRSA extends CipherSpi {
             if (null == key) {
                 throw new InvalidKeyException("RSA private or public key is null");
             }
-            
+
             throw new InvalidKeyException("Need RSA private or public key");
         }
 
-        buffer = new byte[NativeCrypto.RSA_size(this.key.getNativeRef())];
-        bufferOffset = 0;
+        // TODO(nnmittler): buffer = new byte[NativeCrypto.RSA_size(this.key.getNativeRef())];
+        // TODO(nnmittler): bufferOffset = 0;
+        bufferSize = NativeCrypto.RSA_size(this.key.getNativeRef());
+        if (inputBuffer != null) {
+            inputBuffer.clear();
+            if (inputBuffer.remaining() < bufferSize) {
+                // Null out the buffer. We'll lazy-create it later.
+                inputBuffer = null;
+            }
+        }
         inputTooLarge = false;
+        totalInputBytes = 0;
 
         doCryptoInit(spec);
+    }
+
+    final void allocateInputBufferIfNecessary() {
+        if (inputBuffer == null) {
+            inputBuffer = ByteBuffer.allocateDirect(bufferSize);
+            inputBufferAddress = NativeCrypto.getDirectBufferAddress(inputBuffer);
+        }
+    }
+
+    final void allocateOutputBufferIfNecessary() {
+        if (outputBuffer != null && outputBuffer.limit() < bufferSize) {
+            outputBuffer = null;
+        }
+
+        if (outputBuffer == null) {
+            outputBuffer = ByteBuffer.allocateDirect(bufferSize);
+            outputBufferAddress = NativeCrypto.getDirectBufferAddress(outputBuffer);
+        }
+        outputBuffer.clear();
     }
 
     @Override
@@ -249,10 +286,10 @@ abstract class OpenSSLCipherRSA extends CipherSpi {
 
     @Override
     protected void engineInit(int opmode, Key key, AlgorithmParameterSpec params,
-            SecureRandom random) throws InvalidKeyException, InvalidAlgorithmParameterException {
+        SecureRandom random) throws InvalidKeyException, InvalidAlgorithmParameterException {
         if (params != null) {
             throw new InvalidAlgorithmParameterException("unknown param type: "
-                    + params.getClass().getName());
+                + params.getClass().getName());
         }
 
         engineInitInternal(opmode, key, params);
@@ -260,10 +297,10 @@ abstract class OpenSSLCipherRSA extends CipherSpi {
 
     @Override
     protected void engineInit(int opmode, Key key, AlgorithmParameters params, SecureRandom random)
-            throws InvalidKeyException, InvalidAlgorithmParameterException {
+        throws InvalidKeyException, InvalidAlgorithmParameterException {
         if (params != null) {
             throw new InvalidAlgorithmParameterException("unknown param type: "
-                    + params.getClass().getName());
+                + params.getClass().getName());
         }
 
         engineInitInternal(opmode, key, null);
@@ -271,27 +308,98 @@ abstract class OpenSSLCipherRSA extends CipherSpi {
 
     @Override
     protected byte[] engineUpdate(byte[] input, int inputOffset, int inputLen) {
-        if (bufferOffset + inputLen > buffer.length) {
+        // Copy the input into the internal buffer...
+
+        allocateInputBufferIfNecessary();
+
+        // TODO(nmittler): if (bufferOffset + inputLen > buffer.length) {
+        if (inputBuffer.remaining() < inputLen) {
             inputTooLarge = true;
             return EmptyArray.BYTE;
         }
 
-        System.arraycopy(input, inputOffset, buffer, bufferOffset, inputLen);
-        bufferOffset += inputLen;
+        // TODO(nmittler): System.arraycopy(input, inputOffset, buffer, bufferOffset, inputLen);
+        // TODO(nmittler): bufferOffset += inputLen;
+        inputBuffer.put(input, inputOffset, inputLen);
         return EmptyArray.BYTE;
     }
 
     @Override
     protected int engineUpdate(byte[] input, int inputOffset, int inputLen, byte[] output,
-            int outputOffset) throws ShortBufferException {
+        int outputOffset) throws ShortBufferException {
         engineUpdate(input, inputOffset, inputLen);
         return 0;
     }
 
     @Override
+    protected int engineUpdate(ByteBuffer input, ByteBuffer output) throws ShortBufferException {
+        // TODO(nmittler):
+        return super.engineUpdate(input, output);
+    }
+
+    @Override
+    protected int engineDoFinal(ByteBuffer input, ByteBuffer output)
+        throws ShortBufferException, IllegalBlockSizeException, BadPaddingException {
+        if (output.remaining() < bufferSize) {
+            throw new ShortBufferException(
+                "Output buffer is too small " + output.remaining() + " < " + bufferSize);
+        }
+
+        // Use a direct input buffer for the JNI call.
+        final ByteBuffer tempInput;
+        final long tempInputAddress;
+        if (input.isDirect()) {
+            tempInput = input;
+            tempInputAddress = NativeCrypto.getDirectBufferAddress(tempInput);
+        } else {
+            // Use a temporary direct output buffer for the JNI call.
+            allocateInputBufferIfNecessary();
+            // TODO(nmittler): Should clear be part of allocating?
+            inputBuffer.clear();
+            tempInput = inputBuffer;
+            tempInputAddress = inputBufferAddress;
+            tempInput.put(input);
+            tempInput.flip();
+        }
+        final int tempInputPos = tempInput.position();
+        final int tempInputLimit = tempInput.limit();
+
+        // Use a direct output buffer for the JNI call.
+        final ByteBuffer tempOutput;
+        final long tempOutputAddress;
+        if (output.isDirect()) {
+            tempOutput = output;
+            tempOutputAddress = NativeCrypto.getDirectBufferAddress(tempOutput);
+        } else {
+            // Use a temporary direct output buffer for the JNI call.
+            allocateOutputBufferIfNecessary();
+            tempOutput = outputBuffer;
+            tempOutputAddress = outputBufferAddress;
+        }
+        final int tempOutputPos = tempOutput.position();
+
+        // Encrypt the bytes.
+        int outputBytes = doCryptoOperation(tempInputAddress + tempInputPos,
+            tempInputLimit - tempInputPos, tempOutputAddress + tempOutputPos);
+
+        // Mark all of the bytes in the original input buffer as read.
+        input.position(input.limit());
+
+        // Update the position in the temp output buffer and write back to the original output
+        // if necessary.
+        tempOutput.position(tempOutputPos + outputBytes);
+        if (tempOutput != output) {
+            tempOutput.flip();
+            output.put(tempOutput);
+        }
+
+        return outputBytes;
+    }
+
+    @Override
     protected byte[] engineDoFinal(byte[] input, int inputOffset, int inputLen)
-            throws IllegalBlockSizeException, BadPaddingException {
-        if (input != null) {
+        throws IllegalBlockSizeException, BadPaddingException {
+        /*if (input != null) {
             engineUpdate(input, inputOffset, inputLen);
         }
 
@@ -318,22 +426,23 @@ abstract class OpenSSLCipherRSA extends CipherSpi {
         }
 
         bufferOffset = 0;
-        return output;
+        return output;*/
+        throw new UnsupportedOperationException();
     }
 
-    abstract int doCryptoOperation(final byte[] tmpBuf, byte[] output)
-            throws BadPaddingException, IllegalBlockSizeException;
+    abstract int doCryptoOperation(final long inputAddress, int inputLen, long outputAddress)
+        throws BadPaddingException, IllegalBlockSizeException;
 
     @Override
     protected int engineDoFinal(byte[] input, int inputOffset, int inputLen, byte[] output,
-            int outputOffset) throws ShortBufferException, IllegalBlockSizeException,
-            BadPaddingException {
+        int outputOffset) throws ShortBufferException, IllegalBlockSizeException,
+        BadPaddingException {
         byte[] b = engineDoFinal(input, inputOffset, inputLen);
 
         final int lastOffset = outputOffset + b.length;
         if (lastOffset > output.length) {
             throw new ShortBufferException("output buffer is too small " + output.length + " < "
-                    + lastOffset);
+                + lastOffset);
         }
 
         System.arraycopy(b, 0, output, outputOffset, b.length);
@@ -354,7 +463,7 @@ abstract class OpenSSLCipherRSA extends CipherSpi {
 
     @Override
     protected Key engineUnwrap(byte[] wrappedKey, String wrappedKeyAlgorithm,
-            int wrappedKeyType) throws InvalidKeyException, NoSuchAlgorithmException {
+        int wrappedKeyType) throws InvalidKeyException, NoSuchAlgorithmException {
         try {
             byte[] encoded = engineDoFinal(wrappedKey, 0, wrappedKey.length);
             if (wrappedKeyType == Cipher.PUBLIC_KEY) {
@@ -383,25 +492,25 @@ abstract class OpenSSLCipherRSA extends CipherSpi {
         }
 
         @Override
-        int doCryptoOperation(final byte[] tmpBuf, byte[] output)
-                throws BadPaddingException, IllegalBlockSizeException {
+        int doCryptoOperation(final long inputAddress, final int inputLength, final long outputAddress)
+            throws BadPaddingException, IllegalBlockSizeException {
             int resultSize;
             if (encrypting) {
                 if (usingPrivateKey) {
-                    resultSize = NativeCrypto.RSA_private_encrypt(
-                            tmpBuf.length, tmpBuf, output, key.getNativeRef(), padding);
+                    resultSize = NativeCrypto.RSA_private_encrypt_direct(
+                        inputAddress, inputLength, outputAddress, key.getNativeRef(), padding);
                 } else {
-                    resultSize = NativeCrypto.RSA_public_encrypt(
-                            tmpBuf.length, tmpBuf, output, key.getNativeRef(), padding);
+                    resultSize = NativeCrypto.RSA_public_encrypt_direct(
+                        inputAddress, inputLength, outputAddress, key.getNativeRef(), padding);
                 }
             } else {
                 try {
                     if (usingPrivateKey) {
-                        resultSize = NativeCrypto.RSA_private_decrypt(
-                                tmpBuf.length, tmpBuf, output, key.getNativeRef(), padding);
+                        resultSize = NativeCrypto.RSA_private_decrypt_direct(
+                            inputAddress, inputLength, outputAddress, key.getNativeRef(), padding);
                     } else {
-                        resultSize = NativeCrypto.RSA_public_decrypt(
-                                tmpBuf.length, tmpBuf, output, key.getNativeRef(), padding);
+                        resultSize = NativeCrypto.RSA_public_decrypt_direct(
+                            inputAddress, inputLength, outputAddress, key.getNativeRef(), padding);
                     }
                 } catch (SignatureException e) {
                     IllegalBlockSizeException newE = new IllegalBlockSizeException();
@@ -458,11 +567,11 @@ abstract class OpenSSLCipherRSA extends CipherSpi {
                 }
 
                 params.init(new OAEPParameterSpec(
-                        EvpMdRef.getJcaDigestAlgorithmStandardNameFromEVP_MD(oaepMd),
-                        EvpMdRef.MGF1_ALGORITHM_NAME,
-                        new MGF1ParameterSpec(
-                                EvpMdRef.getJcaDigestAlgorithmStandardNameFromEVP_MD(mgf1Md)),
-                        pSrc));
+                    EvpMdRef.getJcaDigestAlgorithmStandardNameFromEVP_MD(oaepMd),
+                    EvpMdRef.MGF1_ALGORITHM_NAME,
+                    new MGF1ParameterSpec(
+                        EvpMdRef.getJcaDigestAlgorithmStandardNameFromEVP_MD(mgf1Md)),
+                    pSrc));
                 return params;
             } catch (NoSuchAlgorithmException e) {
                 // We should not get here.
@@ -485,11 +594,11 @@ abstract class OpenSSLCipherRSA extends CipherSpi {
 
         @Override
         protected void engineInit(
-                int opmode, Key key, AlgorithmParameterSpec spec, SecureRandom random)
-                throws InvalidKeyException, InvalidAlgorithmParameterException {
+            int opmode, Key key, AlgorithmParameterSpec spec, SecureRandom random)
+            throws InvalidKeyException, InvalidAlgorithmParameterException {
             if (spec != null && !(spec instanceof OAEPParameterSpec)) {
                 throw new InvalidAlgorithmParameterException(
-                        "Only OAEPParameterSpec accepted in OAEP mode");
+                    "Only OAEPParameterSpec accepted in OAEP mode");
             }
 
             engineInitInternal(opmode, key, spec);
@@ -497,15 +606,15 @@ abstract class OpenSSLCipherRSA extends CipherSpi {
 
         @Override
         protected void engineInit(
-                int opmode, Key key, AlgorithmParameters params, SecureRandom random)
-                throws InvalidKeyException, InvalidAlgorithmParameterException {
+            int opmode, Key key, AlgorithmParameters params, SecureRandom random)
+            throws InvalidKeyException, InvalidAlgorithmParameterException {
             OAEPParameterSpec spec = null;
             if (params != null) {
                 try {
                     spec = params.getParameterSpec(OAEPParameterSpec.class);
                 } catch (InvalidParameterSpecException e) {
                     throw new InvalidAlgorithmParameterException(
-                            "Only OAEP parameters are supported", e);
+                        "Only OAEP parameters are supported", e);
                 }
             }
 
@@ -514,7 +623,7 @@ abstract class OpenSSLCipherRSA extends CipherSpi {
 
         @Override
         void engineInitInternal(int opmode, Key key, AlgorithmParameterSpec spec)
-                throws InvalidKeyException, InvalidAlgorithmParameterException {
+            throws InvalidKeyException, InvalidAlgorithmParameterException {
             if (opmode == Cipher.ENCRYPT_MODE || opmode == Cipher.WRAP_MODE) {
                 if (!(key instanceof PublicKey)) {
                     throw new InvalidKeyException("Only public keys may be used to encrypt");
@@ -531,15 +640,15 @@ abstract class OpenSSLCipherRSA extends CipherSpi {
         void doCryptoInit(AlgorithmParameterSpec spec)
             throws InvalidAlgorithmParameterException, InvalidKeyException {
             pkeyCtx = new NativeRef.EVP_PKEY_CTX(encrypting
-                            ? NativeCrypto.EVP_PKEY_encrypt_init(key.getNativeRef())
-                            : NativeCrypto.EVP_PKEY_decrypt_init(key.getNativeRef()));
+                ? NativeCrypto.EVP_PKEY_encrypt_init(key.getNativeRef())
+                : NativeCrypto.EVP_PKEY_decrypt_init(key.getNativeRef()));
 
             if (spec instanceof OAEPParameterSpec) {
                 readOAEPParameters((OAEPParameterSpec) spec);
             }
 
             NativeCrypto.EVP_PKEY_CTX_set_rsa_padding(
-                    pkeyCtx.context, NativeConstants.RSA_PKCS1_OAEP_PADDING);
+                pkeyCtx.context, NativeConstants.RSA_PKCS1_OAEP_PADDING);
             NativeCrypto.EVP_PKEY_CTX_set_rsa_oaep_md(pkeyCtx.context, oaepMd);
             NativeCrypto.EVP_PKEY_CTX_set_rsa_mgf1_md(pkeyCtx.context, mgf1Md);
             if (label != null && label.length > 0) {
@@ -557,14 +666,14 @@ abstract class OpenSSLCipherRSA extends CipherSpi {
         }
 
         private void readOAEPParameters(OAEPParameterSpec spec)
-                throws InvalidAlgorithmParameterException {
+            throws InvalidAlgorithmParameterException {
             String mgfAlgUpper = spec.getMGFAlgorithm().toUpperCase(Locale.US);
             AlgorithmParameterSpec mgfSpec = spec.getMGFParameters();
             if ((!EvpMdRef.MGF1_ALGORITHM_NAME.equals(mgfAlgUpper)
-                        && !EvpMdRef.MGF1_OID.equals(mgfAlgUpper))
-                    || !(mgfSpec instanceof MGF1ParameterSpec)) {
+                && !EvpMdRef.MGF1_OID.equals(mgfAlgUpper))
+                || !(mgfSpec instanceof MGF1ParameterSpec)) {
                 throw new InvalidAlgorithmParameterException(
-                        "Only MGF1 supported as mask generation function");
+                    "Only MGF1 supported as mask generation function");
             }
 
             MGF1ParameterSpec mgf1spec = (MGF1ParameterSpec) mgfSpec;
@@ -572,30 +681,31 @@ abstract class OpenSSLCipherRSA extends CipherSpi {
             try {
                 oaepMd = EvpMdRef.getEVP_MDByJcaDigestAlgorithmStandardName(oaepAlgUpper);
                 oaepMdSizeBytes =
-                        EvpMdRef.getDigestSizeBytesByJcaDigestAlgorithmStandardName(oaepAlgUpper);
+                    EvpMdRef.getDigestSizeBytesByJcaDigestAlgorithmStandardName(oaepAlgUpper);
                 mgf1Md = EvpMdRef.getEVP_MDByJcaDigestAlgorithmStandardName(
-                        mgf1spec.getDigestAlgorithm());
+                    mgf1spec.getDigestAlgorithm());
             } catch (NoSuchAlgorithmException e) {
                 throw new InvalidAlgorithmParameterException(e);
             }
 
             PSource pSource = spec.getPSource();
             if (!"PSpecified".equals(pSource.getAlgorithm())
-                    || !(pSource instanceof PSource.PSpecified)) {
+                || !(pSource instanceof PSource.PSpecified)) {
                 throw new InvalidAlgorithmParameterException(
-                        "Only PSpecified accepted for PSource");
+                    "Only PSpecified accepted for PSource");
             }
             label = ((PSource.PSpecified) pSource).getValue();
         }
 
         @Override
-        int doCryptoOperation(byte[] tmpBuf, byte[] output)
-                throws BadPaddingException, IllegalBlockSizeException {
-            if (encrypting) {
+        int doCryptoOperation(long inputAddress, int inputLength, long outputAddress)
+            throws BadPaddingException, IllegalBlockSizeException {
+            /*if (encrypting) {
                 return NativeCrypto.EVP_PKEY_encrypt(pkeyCtx, output, 0, tmpBuf, 0, tmpBuf.length);
             } else {
                 return NativeCrypto.EVP_PKEY_decrypt(pkeyCtx, output, 0, tmpBuf, 0, tmpBuf.length);
-            }
+            }*/
+            throw new UnsupportedOperationException();
         }
 
         public static final class SHA1 extends OAEP {

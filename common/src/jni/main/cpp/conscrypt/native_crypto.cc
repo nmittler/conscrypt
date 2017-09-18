@@ -1421,6 +1421,67 @@ static jint NativeCrypto_RSA_private_decrypt(JNIEnv* env, jclass, jint flen,
                                toJavaBytes, pkeyRef, padding);
 }
 
+// Direct ByteBuffer versions of the RSA encryption methods
+
+static jint RSA_crypt_operation_direct(RSACryptOperation operation, const char* caller, JNIEnv* env,
+                                jlong inputAddress, jint inputLength, jlong outputAddress,
+                                jobject pkeyRef, jint padding) {
+    EVP_PKEY* pkey = fromContextObject<EVP_PKEY>(env, pkeyRef);
+    JNI_TRACE("%s(%ld, %d, %ld, %p)", caller, inputAddress, inputLength, outputAddress, pkey);
+
+    if (pkey == nullptr) {
+        return -1;
+    }
+
+    bssl::UniquePtr<RSA> rsa(EVP_PKEY_get1_RSA(pkey));
+    if (rsa.get() == nullptr) {
+        return -1;
+    }
+
+    unsigned char* inputPtr = reinterpret_cast<unsigned char*>(inputAddress);
+    unsigned char* outputPtr = reinterpret_cast<unsigned char*>(outputAddress);
+
+    int resultSize = operation(static_cast<size_t>(inputLength), inputPtr, outputPtr, rsa.get(),
+                               padding);
+    if (resultSize == -1) {
+        if (conscrypt::jniutil::throwExceptionIfNecessary(env, caller)) {
+            JNI_TRACE("%s => threw error", caller);
+        } else {
+            conscrypt::jniutil::throwBadPaddingException(env, caller);
+            JNI_TRACE("%s => threw padding exception", caller);
+        }
+        return -1;
+    }
+
+    JNI_TRACE("%s => %d", caller, resultSize);
+    return static_cast<jint>(resultSize);
+}
+
+static jint NativeCrypto_RSA_private_encrypt_direct(JNIEnv* env, jclass, jlong inputAddress,
+                                             jint inputLength, jlong outputAddress,
+                                             jobject pkeyRef, jint padding) {
+    return RSA_crypt_operation_direct(RSA_private_encrypt, __FUNCTION__, env, inputAddress,
+                               inputLength, outputAddress, pkeyRef, padding);
+}
+static jint NativeCrypto_RSA_public_decrypt_direct(JNIEnv* env, jclass, jlong inputAddress,
+                                            jint inputLength, jlong outputAddress,
+                                            jobject pkeyRef, jint padding) {
+    return RSA_crypt_operation_direct(RSA_public_decrypt, __FUNCTION__, env, inputAddress,
+                               inputLength, outputAddress, pkeyRef, padding);
+}
+static jint NativeCrypto_RSA_public_encrypt_direct(JNIEnv* env, jclass, jlong inputAddress,
+                                            jint inputLength, jlong outputAddress,
+                                            jobject pkeyRef, jint padding) {
+    return RSA_crypt_operation_direct(RSA_public_encrypt, __FUNCTION__, env, inputAddress,
+                               inputLength, outputAddress, pkeyRef, padding);
+}
+static jint NativeCrypto_RSA_private_decrypt_direct(JNIEnv* env, jclass, jlong inputAddress,
+                                             jint inputLength, jlong outputAddress,
+                                             jobject pkeyRef, jint padding) {
+    return RSA_crypt_operation_direct(RSA_private_decrypt, __FUNCTION__, env, inputAddress,
+                               inputLength, outputAddress, pkeyRef, padding);
+}
+
 /*
  * public static native byte[][] get_RSA_public_params(long);
  */
@@ -3399,6 +3460,67 @@ static jint NativeCrypto_EVP_AEAD_CTX_open(JNIEnv* env, jclass, jlong evpAeadRef
                                            jbyteArray aadArray) {
     return evp_aead_ctx_op(env, evpAeadRef, keyArray, tagLen, outArray, outOffset, nonceArray,
                            inArray, inOffset, inLength, aadArray, EVP_AEAD_CTX_open);
+}
+
+// Direct ByteBuffer versions
+
+static jint evp_aead_ctx_op_direct(JNIEnv* env, jlong evpAeadRef, jlong keyAddress, jint keyLength,
+                                   jint tagLen, jlong outAddress, jint outLength,
+                                   jlong nonceAddress, jint nonceLength, jlong inAddress,
+                                   jint inLength, jlong aadAddress, jint aadLength,
+                                   evp_aead_ctx_op_func realFunc) {
+    const EVP_AEAD* evpAead = reinterpret_cast<const EVP_AEAD*>(evpAeadRef);
+    JNI_TRACE("evp_aead_ctx_op_direct(%p, %p, %d, %p, %p, %p, %p)", evpAead,
+              keyAddress, tagLen, outAddress, nonceAddress, inAddress, aadAddress);
+
+    bssl::ScopedEVP_AEAD_CTX aeadCtx;
+    const uint8_t* keyBytes = reinterpret_cast<const uint8_t*>(keyAddress);
+    if (!EVP_AEAD_CTX_init(aeadCtx.get(), evpAead, keyBytes, static_cast<size_t>(keyLength),
+                           static_cast<size_t>(tagLen), nullptr)) {
+        conscrypt::jniutil::throwExceptionIfNecessary(env, "failure initializing AEAD context");
+        JNI_TRACE("evp_aead_ctx_op_direct(%p, %p, %d, %p, %p, %p, %p) => fail EVP_AEAD_CTX_init",
+                  evpAead, keyAddress, tagLen, outAddress, nonceAddress, inAddress, aadAddress);
+        return 0;
+    }
+
+    uint8_t* outBytes = reinterpret_cast<uint8_t*>(outAddress);
+    const uint8_t* inBytes = reinterpret_cast<const uint8_t*>(inAddress);
+    const uint8_t* nonceBytes = reinterpret_cast<const uint8_t*>(nonceAddress);
+    const uint8_t* aadBytes = reinterpret_cast<const uint8_t*>(aadAddress);
+    size_t actualOutLength;
+    if (!realFunc(aeadCtx.get(), outBytes, &actualOutLength, static_cast<size_t>(outLength),
+                  nonceBytes, static_cast<size_t>(nonceLength),
+                  inBytes, static_cast<size_t>(inLength),
+                  aadBytes, static_cast<size_t>(aadLength))) {
+        conscrypt::jniutil::throwExceptionIfNecessary(env, "evp_aead_ctx_op");
+    }
+
+    JNI_TRACE("evp_aead_ctx_op_direct(%p, %p, %d, %p, %p, %p, %p) => success outlength=%zd",
+              evpAead, keyAddress, tagLen, outAddress, nonceAddress, inAddress, aadAddress,
+              actualOutLength);
+    return static_cast<jint>(actualOutLength);
+}
+
+static jint NativeCrypto_EVP_AEAD_CTX_seal_direct(JNIEnv* env, jclass, jlong evpAeadRef,
+                                                  jlong keyAddress, jint keyLength, jint tagLen,
+                                                  jlong outAddress, jint outLength,
+                                                  jlong nonceAddress, jint nonceLength,
+                                                  jlong inAddress, jint inLength, jlong aadAddress,
+                                                  jint aadLength) {
+    return evp_aead_ctx_op_direct(env, evpAeadRef, keyAddress, keyLength, tagLen, outAddress,
+                                  outLength, nonceAddress, nonceLength, inAddress, inLength,
+                                  aadAddress, aadLength, EVP_AEAD_CTX_seal);
+}
+
+static jint NativeCrypto_EVP_AEAD_CTX_open_direct(JNIEnv* env, jclass, jlong evpAeadRef,
+                                                  jlong keyAddress, jint keyLength, jint tagLen,
+                                                  jlong outAddress, jint outLength,
+                                                  jlong nonceAddress, jint nonceLength,
+                                                  jlong inAddress, jint inLength, jlong aadAddress,
+                                                  jint aadLength) {
+    return evp_aead_ctx_op_direct(env, evpAeadRef, keyAddress, keyLength, tagLen, outAddress,
+                                      outLength, nonceAddress, nonceLength, inAddress, inLength,
+                                      aadAddress, aadLength, EVP_AEAD_CTX_open);
 }
 
 static jlong NativeCrypto_HMAC_CTX_new(JNIEnv* env, jclass) {
@@ -9350,6 +9472,10 @@ static JNINativeMethod sNativeCryptoMethods[] = {
         CONSCRYPT_NATIVE_METHOD(RSA_public_decrypt, "(I[B[B" REF_EVP_PKEY "I)I"),
         CONSCRYPT_NATIVE_METHOD(RSA_public_encrypt, "(I[B[B" REF_EVP_PKEY "I)I"),
         CONSCRYPT_NATIVE_METHOD(RSA_private_decrypt, "(I[B[B" REF_EVP_PKEY "I)I"),
+        CONSCRYPT_NATIVE_METHOD(RSA_private_encrypt_direct, "(JIJ" REF_EVP_PKEY "I)I"),
+        CONSCRYPT_NATIVE_METHOD(RSA_public_decrypt_direct, "(JIJ" REF_EVP_PKEY "I)I"),
+        CONSCRYPT_NATIVE_METHOD(RSA_public_encrypt_direct, "(JIJ" REF_EVP_PKEY "I)I"),
+        CONSCRYPT_NATIVE_METHOD(RSA_private_decrypt_direct, "(JIJ" REF_EVP_PKEY "I)I"),
         CONSCRYPT_NATIVE_METHOD(get_RSA_private_params, "(" REF_EVP_PKEY ")[[B"),
         CONSCRYPT_NATIVE_METHOD(get_RSA_public_params, "(" REF_EVP_PKEY ")[[B"),
         CONSCRYPT_NATIVE_METHOD(EC_GROUP_new_by_curve_name, "(Ljava/lang/String;)J"),
@@ -9423,6 +9549,8 @@ static JNINativeMethod sNativeCryptoMethods[] = {
         CONSCRYPT_NATIVE_METHOD(EVP_AEAD_nonce_length, "(J)I"),
         CONSCRYPT_NATIVE_METHOD(EVP_AEAD_CTX_seal, "(J[BI[BI[B[BII[B)I"),
         CONSCRYPT_NATIVE_METHOD(EVP_AEAD_CTX_open, "(J[BI[BI[B[BII[B)I"),
+        CONSCRYPT_NATIVE_METHOD(EVP_AEAD_CTX_seal_direct, "(JJIIJIJIJIJI)I"),
+        CONSCRYPT_NATIVE_METHOD(EVP_AEAD_CTX_open_direct, "(JJIIJIJIJIJI)I"),
         CONSCRYPT_NATIVE_METHOD(HMAC_CTX_new, "()J"),
         CONSCRYPT_NATIVE_METHOD(HMAC_CTX_free, "(J)V"),
         CONSCRYPT_NATIVE_METHOD(HMAC_Init_ex, "(" REF_HMAC_CTX "[BJ)V"),
